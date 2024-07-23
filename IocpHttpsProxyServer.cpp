@@ -34,10 +34,8 @@ typedef enum _IO_OPERATION {
     CLIENT_IO_WRITE,
     SERVER_IO_READ,
     SERVER_IO_WRITE,
-    SSL_SERVER_IO_WRITE,
-    SSL_SERVER_IO_READ,
-    SSL_CLIENT_IO_WRITE,
-    SSL_CLIENT_IO_READ,
+    SSL_SERVER_IO,
+    SSL_CLIENT_IO,
 } IO_OPERATION, * PERIO_OPERATIONS;
 
 typedef struct _PER_IO_DATA  {
@@ -53,6 +51,7 @@ typedef struct _PER_IO_DATA  {
     string hostname;
     EVP_PKEY* pkey;
     BIO* srBio, * swBio, * crBio, * cwBio;
+    BOOL recvFlag = FALSE;
 } PER_IO_DATA, * LPPER_IO_DATA;
 
 HANDLE ProxyCompletionPort;
@@ -666,7 +665,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
         case CLIENT_ACCEPT: {
 
             ioData->bytesRecv = bytesTransferred;
-            ioData->ioOperation = SSL_SERVER_IO_WRITE;
+            ioData->ioOperation = SSL_SERVER_IO;
 
             string request(ioData->cRecvBuffer, ioData->bytesRecv);
             string hostname;
@@ -752,89 +751,81 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             break;
         }
 
-        case SSL_SERVER_IO_WRITE: {
+        case SSL_SERVER_IO: {
 
-            cout << "SSL_SERVER_IO_WRITE" << endl;
-
-            /*ioData->ioOperation = SSL_SERVER_IO_READ;*/
-
-            if (ioData->bytesRecv > 0)
+            if (ioData->sRecvBuffer[0])
             {
-                int bio_write = BIO_write(ioData->srBio, ioData->sRecvBuffer, ioData->bytesRecv);
+                //cout << "Bytes transferred - " << bytesTransferred << endl;
+
+                int bio_write = BIO_write(ioData->srBio, ioData->sRecvBuffer, bytesTransferred);
                 if (bio_write > 0) {
                     cout << "[+]BIO_write() server - " << bio_write << " bytes." << endl;
                 }
-                ioData->bytesRecv -= bio_write;
+                memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
             }
 
-            //if (ret_server == 1) 
-            //{
-            //    int bio_write = 0, ret_client;
-            //    ioData->ioOperation = SSL_CLIENT_IO_WRITE;
-            //    cout << "[+]SSL handshake done with server" << endl;
-
-            //    ioData->targetCert = SSL_get_peer_certificate(ioData->targetSSL);
-            //    if (!ioData->targetCert) 
-            //    {
-            //        cout << "[-]Cert of server not extracted" << endl;
-            //        SSL_shutdown(ioData->targetSSL);
-            //        SSL_free(ioData->targetSSL);
-            //    }
-
-            //    /*SSL handshake with client*/
-            //    ioData->clientCTX = SSL_CTX_new(TLS_server_method());
-            //    /*SSL_CTX_set_tlsext_servername_callback(ioData->clientCTX, ServerNameCallback);*/
-
-            //    ioData->pkey = generatePrivateKey();
-            //    ioData->clientCert = create_certificate(caCert, caKey, ioData->pkey, ioData->targetCert);
-            //    configureContext(ioData->clientCTX, ioData->clientCert, ioData->pkey);
-
-            //    /*ioData->clientCert = generate_certificate(ioData->hostname.c_str(), ioData->pkey, caCert, caKey);
-            //    configureContext(ioData->clientCTX, ioData->clientCert, ioData->pkey);*/
-
-            //    ioData->clientSSL = SSL_new(ioData->clientCTX);
-            //    SSL_set_accept_state(ioData->clientSSL); /* to act as SERVER */
-
-            //    SSL_set_bio(ioData->clientSSL, ioData->crBio, ioData->cwBio);
-
-            //    if (!SSL_is_init_finished(ioData->clientSSL)) 
-            //    {    
-            //        ret_client = SSL_do_handshake(ioData->clientSSL);
-
-            //        if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR) 
-            //        {
-            //            DWORD error = WSAGetLastError();
-            //            if (error != WSA_IO_PENDING) 
-            //            {
-            //                cout << "[-]WSARecv() failed - " << error << endl;
-            //                closesocket(ioData->clientSocket);
-            //                closesocket(ioData->serverSocket);
-            //                SSL_free(ioData->clientSSL);
-            //                SSL_free(ioData->targetSSL);
-            //                SSL_CTX_free(ioData->clientCTX);
-            //                delete ioData;
-            //                break;
-            //            }
-            //        }
-            //        else 
-            //        {
-            //            cout << "[+]WSARecv() client - " << ioData->bytesRecv << " bytes." << endl;
-            //        }
-
-            //    }
-
-            //}
-
-            /*SSL handshake with server*/
+            // SSL handshake with server 
             if (!SSL_is_init_finished(ioData->targetSSL))
             {
                 char Buf[BUFFER_SIZE] = {};
                 int bio_read = 0, ret_server, status;
-                
+
                 ret_server = SSL_do_handshake(ioData->targetSSL);
 
                 if (ret_server == 1) {
                     cout << "[+]SSL handshake with server done - 1" << endl;
+
+                    // SSL handshake with client
+                    ioData->ioOperation = SSL_CLIENT_IO;
+
+                    // Extract certificate of Server
+                    ioData->targetCert = SSL_get_peer_certificate(ioData->targetSSL);
+                    if (!ioData->targetCert)
+                    {
+                        cout << "[-]Cert of server not extracted" << endl;
+                        SSL_shutdown(ioData->targetSSL);
+                        SSL_free(ioData->targetSSL);
+                    }
+
+                    ioData->clientCTX = SSL_CTX_new(TLS_server_method());
+                    if (!ioData->clientCTX)
+                    {
+                        cerr << "[-]Failed to create client SSL CTX" << endl;
+                    }
+
+                    ioData->pkey = generatePrivateKey();
+                    ioData->clientCert = create_certificate(caCert, caKey, ioData->pkey, ioData->targetCert);
+                    configureContext(ioData->clientCTX, ioData->clientCert, ioData->pkey);
+
+                    ioData->clientSSL = SSL_new(ioData->clientCTX);
+                    SSL_set_accept_state(ioData->clientSSL); // to act as SERVER 
+                    SSL_set_bio(ioData->clientSSL, ioData->crBio, ioData->cwBio);
+
+                    if (!SSL_is_init_finished(ioData->clientSSL))
+                    {
+                        int ret_client = SSL_do_handshake(ioData->clientSSL);
+
+                        if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
+                        {
+                            DWORD error = WSAGetLastError();
+                            if (error != WSA_IO_PENDING)
+                            {
+                                cout << "[-]WSARecv() failed - " << error << endl;
+                                closesocket(ioData->clientSocket);
+                                closesocket(ioData->serverSocket);
+                                SSL_free(ioData->clientSSL);
+                                SSL_free(ioData->targetSSL);
+                                SSL_CTX_free(ioData->clientCTX);
+                                delete ioData;
+                            }
+                        }
+                        else
+                        {
+                            cout << "[+]WSARecv() client - " << ioData->bytesRecv << " bytes." << endl;
+                        }
+
+                    }
+
                     break;
                 }
 
@@ -862,7 +853,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                                 closesocket(ioData->serverSocket);
                                 SSL_free(ioData->targetSSL);
                                 delete ioData;
-                                break;
                             }
                         }
                         else
@@ -886,7 +876,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                                 closesocket(ioData->serverSocket);
                                 SSL_free(ioData->targetSSL);
                                 delete ioData;
-                                break;
                             }
                         }
                         else
@@ -900,158 +889,135 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 {
                     cout << "[-]SSL_get_error - " << status << endl;
                 }
-                
+
             }
             else
             {
                 cout << "[+]SSL handshake with server done - 2" << endl;
-                break;
             }
 
             break;
         }
 
-        /*case SSL_SERVER_IO_READ: {
+        case SSL_CLIENT_IO: {
 
-            cout << "SSL_SERVER_IO_READ" << endl;
-
-            ioData->ioOperation = SSL_SERVER_IO_WRITE;
-
-            int bio_write = 0;
-            ioData->bytesRecv = 0;
-            ioData->wsaServerRecvBuf.len = BUFFER_SIZE;
-
-            if (WSARecv(ioData->serverSocket, &ioData->wsaServerRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR) 
+            // SSL handshake with client
+            if (ioData->cRecvBuffer[0])
             {
-                int error = WSAGetLastError();
-                cout << "[-]WSARecv error - " << error << endl;
-                if (error != WSA_IO_PENDING) 
-                {
-                    cerr << "[-]WSARecv error - " << error << endl;
-                    closesocket(ioData->clientSocket);
-                    closesocket(ioData->serverSocket);
-                    SSL_free(ioData->targetSSL);
-                    delete ioData;
-                    break;
+                int bio_write = BIO_write(ioData->crBio, ioData->cRecvBuffer, bytesTransferred);
+                if (bio_write > 0) {
+                    cout << "[+]BIO_write() client - " << bio_write << " bytes." << endl;
                 }
+                memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
             }
-            else 
+
+            if (!SSL_is_init_finished(ioData->clientSSL))
             {
-                cout << "[+]WSARecv() server - " << ioData->bytesRecv << " bytes." << endl;
-            }
+                char Buf[BUFFER_SIZE] = {};
+                int bio_read = 0, ret_client, status;
 
-            break;
-        }*/
+                ret_client = SSL_do_handshake(ioData->clientSSL);
 
-        case SSL_CLIENT_IO_READ: {
+                if (ret_client == 1) {
+                    cout << "[+]SSL handshake with client done - 1" << endl;
 
-            cout << "SSL_CLIENT_IO_READ" << endl;
+                    ioData->ioOperation = SERVER_IO_WRITE;
 
-            ioData->ioOperation = SSL_CLIENT_IO_WRITE;
-            int error, bio_write = 0;
-
-            if (SSL_do_handshake(ioData->clientSSL) == 1) 
-            {
-                ioData->ioOperation = CLIENT_IO_READ;
-                cout << "[+]SSL handshake done with client" << endl;
-                break;
-            }
-
-            ioData->wsaClientRecvBuf.len = BUFFER_SIZE;
-
-            if (!SSL_is_init_finished(ioData->clientSSL)) {
-                
-                if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) != SOCKET_ERROR) 
-                {
-                    error = WSAGetLastError();
-                    if (error != WSA_IO_PENDING) 
+                    if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
                     {
-                        cerr << "[-]WSARecv error - " << error << endl;
-                        closesocket(ioData->clientSocket);
-                        closesocket(ioData->serverSocket);
-                        SSL_free(ioData->clientSSL);
-                        SSL_free(ioData->targetSSL);
-                        SSL_CTX_free(ioData->clientCTX);
-                        delete ioData;
-                        break;
-                    }
-                }
-                else 
-                {
-                    cout << "[+]WSARecv() client - " << ioData->bytesRecv << " bytes." << endl;
-                    bio_write = BIO_write(ioData->crBio, ioData->cRecvBuffer, ioData->bytesRecv);
-                    if (bio_write > 0) 
-                    {
-                        cout << "[+]BIO_write() client - " << bio_write << " bytes." << endl;
-                    }
-                }
-
-            }
-
-            break;
-        }
-
-        case SSL_CLIENT_IO_WRITE: {
-
-            cout << "SSL_CLIENT_IO_WRITE" << endl;
-
-            ioData->ioOperation = SSL_CLIENT_IO_READ;
-
-            int bio_write = 0, ret_client;
-
-            bio_write = BIO_write(ioData->crBio, ioData->cRecvBuffer, ioData->bytesRecv);
-            if (bio_write > 0) {
-                cout << "[+]BIO_write() client - " << bio_write << " bytes." << endl;
-            }
-            else {
-                cout << "[-]BIO_write() client failed" << endl;
-            }
-
-            ret_client = SSL_do_handshake(ioData->clientSSL);
-
-            if (ret_client == 1) {
-                ioData->ioOperation = CLIENT_IO_READ;
-                cout << "[+]SSL handshake done with client" << endl;
-                break;
-            }
-
-            char Buf[BUFFER_SIZE] = {};
-            int bio_read = 0, error;
-
-            ret_client = SSL_get_error(ioData->clientSSL, ret_client);
-
-            if (ret_client == SSL_ERROR_WANT_READ) 
-            {
-                bio_read = BIO_read(ioData->cwBio, Buf, BUFFER_SIZE);
-
-                cout << "[+]BIO_read() client - " << bio_read << " bytes." << endl;
-
-                if (bio_read > 0) 
-                {
-                    memcpy(ioData->wsaClientSendBuf.buf, Buf, bio_read);
-                    ioData->wsaClientSendBuf.len = bio_read;
-
-                    if (WSASend(ioData->clientSocket, &ioData->wsaClientSendBuf, 1, &ioData->bytesSend, flags, &ioData->overlapped, NULL) == SOCKET_ERROR) 
-                    {
-                        error = WSAGetLastError();
-                        if (error != WSA_IO_PENDING) 
+                        if (WSAGetLastError() != WSA_IO_PENDING)
                         {
-                            cout << "[-]WSASend() error - " << error << endl;
+                            cerr << "[-]WSARecv() failed" << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
                             SSL_free(ioData->clientSSL);
                             SSL_free(ioData->targetSSL);
                             SSL_CTX_free(ioData->clientCTX);
                             delete ioData;
+                            continue;
                         }
                     }
-                    else 
+                    else {
+                        cout << "[+]WSARecv() - " << ioData->bytesRecv << " bytes." << endl;
+                    }
+
+                    break;
+                }
+
+                status = SSL_get_error(ioData->clientSSL, ret_client);
+
+                if (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE)
+                {
+                    bio_read = BIO_read(ioData->cwBio, Buf, BUFFER_SIZE);
+
+                    if (bio_read > 0)
                     {
-                        cout << "[+]WSASend() client - " << ioData->bytesSend << " bytes." << endl;
+                        cout << "[+]BIO_read() client - " << bio_read << " bytes." << endl;
+
+                        memcpy(ioData->wsaClientSendBuf.buf, Buf, bio_read);
+                        ioData->wsaClientSendBuf.len = bio_read;
+
+                        if (WSASend(ioData->clientSocket, &ioData->wsaClientSendBuf, 1, &ioData->bytesSend, 0, &ioData->overlapped, NULL) == SOCKET_ERROR)
+                        {
+                            int error = WSAGetLastError();
+                            cout << "[-]WSASend error - " << error << endl;
+                            if (error != WSA_IO_PENDING)
+                            {
+                                cerr << "[-]WSASend error - " << error << endl;
+                                closesocket(ioData->clientSocket);
+                                closesocket(ioData->serverSocket);
+                                SSL_free(ioData->clientSSL);
+                                SSL_free(ioData->targetSSL);
+                                SSL_CTX_free(ioData->clientCTX);
+                                delete ioData;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            cout << "[+]WSASend() client - " << ioData->bytesSend << " bytes." << endl;
+                        }
+                    }
+                    else
+                    {
+
+                        ioData->bytesRecv = 0;
+                        ioData->wsaClientRecvBuf.len = BUFFER_SIZE;
+
+                        if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
+                        {
+                            int error = WSAGetLastError();
+                            cout << "[-]WSARecv error - " << error << endl;
+                            if (error != WSA_IO_PENDING)
+                            {
+                                cerr << "[-]WSARecv error - " << error << endl;
+                                closesocket(ioData->clientSocket);
+                                closesocket(ioData->serverSocket);
+                                SSL_free(ioData->clientSSL);
+                                SSL_free(ioData->targetSSL);
+                                SSL_CTX_free(ioData->clientCTX);
+                                delete ioData;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            cout << "[+]WSARecv() client - " << ioData->bytesRecv << " bytes." << endl;
+                        }
+                        
                     }
 
                 }
+                else
+                {
+                    cout << "[-]SSL_get_error - " << status << endl;
+                }
 
+            }
+            else
+            {
+                cout << "[+]SSL handshake with client done - 2" << endl;
+                break;
             }
 
             break;
@@ -1059,11 +1025,8 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
         case CLIENT_IO_READ: {
 
-            cout << "CLIENT_IO_READ" << endl;
-
             ioData->ioOperation = SERVER_IO_WRITE;
             ioData->wsaClientRecvBuf.len = BUFFER_SIZE;
-            int sslRead, bioWrite;
 
             if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR) 
             {
@@ -1081,11 +1044,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             }
             else {
                 cout << "[+]WSARecv() - " << ioData->bytesRecv << " bytes." << endl;
-                sslRead = SSL_read(ioData->clientSSL, ioData->wsaClientRecvBuf.buf, BUFFER_SIZE);
-                if (sslRead > 0) {
-                    cout << "[+]SSL_read() - " << sslRead << endl;
-                    bioWrite = BIO_write(ioData->srBio, ioData->wsaClientRecvBuf.buf, sslRead);
-                }
             }
 
             break;
@@ -1093,13 +1051,21 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
         case SERVER_IO_WRITE: {
 
-            cout << "SERVER_IO_WRITE" << endl;
-
             ioData->ioOperation = SERVER_IO_READ;
             ioData->wsaServerSendBuf.len = bytesTransferred;
-            int bioRead, sslWrite;
-            bioRead = BIO_read(ioData->swBio, ioData->wsaServerSendBuf.buf, ioData->wsaServerSendBuf.len);
-            sslWrite = SSL_write(ioData->targetSSL, ioData->wsaServerSendBuf.buf, bioRead);
+            int bioRead = 0, sslWrite = 0, sslRead = 0, bioWrite = 0;
+
+            sslRead = SSL_read(ioData->clientSSL, ioData->wsaClientRecvBuf.buf, ioData->bytesRecv);
+            if (sslRead > 0) {
+                cout << "[+]SSL_read() - " << sslRead << endl;
+                bioWrite = BIO_write(ioData->srBio, ioData->wsaClientRecvBuf.buf, sslRead);
+            }
+
+            bioRead = BIO_read(ioData->swBio, ioData->wsaServerSendBuf.buf, BUFFER_SIZE);
+            if (bioRead > 0)
+            {
+                sslWrite = SSL_write(ioData->targetSSL, ioData->wsaServerSendBuf.buf, bioRead);
+            }
 
             if (sslWrite > 0) {
                 ioData->wsaServerSendBuf.len = sslWrite;
