@@ -6,7 +6,8 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <openssl/applink.c>
+#include <thread>
+#include <vector>
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
@@ -14,11 +15,11 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
-#include <string>
-#include <thread>
-#include <vector>
-#include <winsock2.h>
-#include <WS2tcpip.h>
+#include <openssl/applink.c>
+
+#include "IocpHttp.h"
+#include "Util.h"
+#include "SslUtil.h"
 
 using namespace std;
 
@@ -31,30 +32,7 @@ using namespace std;
 #define BUFFER_SIZE 4096
 #define PORT        8080
 
-bool verbose = true;
-static int ID = 0;
-
-typedef enum MODE 
-{
-    CLIENT,
-    SERVER,
-};
-
-typedef enum _IO_OPERATION 
-{
-    CLIENT_ACCEPT,
-    HTTP_S_RECV,
-    HTTP_S_SEND,
-    HTTP_C_RECV,
-    HTTP_C_SEND,
-    CLIENT_IO,
-    SERVER_IO,
-    IO,
-    SSL_SERVER_IO,
-    SSL_CLIENT_IO,
-} IO_OPERATION, * PERIO_OPERATIONS;
-
-typedef struct _PER_IO_DATA 
+typedef struct _PER_IO_DATA
 {
     WSAOVERLAPPED overlapped;
     DWORD key = ++ID;
@@ -77,21 +55,8 @@ HANDLE ProxyCompletionPort;
 X509* caCert;
 EVP_PKEY* caKey;
 
-void initializeWinsock();
-void initializeOpenSSL();
-SOCKET createSocket(int port);
 LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERATION ioOperation);
-EVP_PKEY* generatePrivateKey();
-vector<string> get_sans(X509* cert);
-string get_cn(X509* cert);
-void SSL_CTX_keylog_callback_func(const SSL* ssl, const char* line);
-X509* create_certificate(X509* ca_cert, EVP_PKEY* ca_pkey, EVP_PKEY* pkey, X509* target_cert, string hostname);
-void configureContext(SSL_CTX* ctx, X509* cert, EVP_PKEY* pkey);
-BOOL IOUtil(LPPER_IO_DATA ioData, MODE mode, int bytesTransferred);
-BOOL BioUtil(LPPER_IO_DATA ioData, MODE mode);
-string toHex(const char* data, size_t length);
 static DWORD WINAPI WorkerThread(LPVOID lparameter);
-void cleanupSSL();
 
 int main()
 {
@@ -201,147 +166,6 @@ int main()
     return 0;
 }
 
-void initializeWinsock()
-{
-    WSADATA wsaData;
-    int result = WSAStartup(MAKEWORD(2, 2), &wsaData);
-    if (result != 0)
-    {
-        cerr << "[-]WSAStartup failed - " << result << endl;
-        exit(EXIT_FAILURE);
-    }
-    else if (verbose)
-    {
-        cout << "[+]Winsock initialized" << endl;
-    }
-}
-
-void initializeOpenSSL()
-{
-    SSL_library_init();
-    SSL_load_error_strings();
-    ERR_load_BIO_strings();
-    OpenSSL_add_ssl_algorithms();
-    if (verbose)
-    {
-        cout << "[+]OpenSSL initialized" << endl;
-    }
-}
-
-EVP_PKEY* generatePrivateKey()
-{
-    EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
-    if (!pctx)
-    {
-        cerr << "[-]EVP_PKEY_CTX_new_id failed" << endl;
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
-    }
-
-    if (EVP_PKEY_keygen_init(pctx) <= 0)
-    {
-        cerr << "[-]EVP_PKEY_keygen_init failed" << endl;
-        ERR_print_errors_fp(stderr);
-        EVP_PKEY_CTX_free(pctx);
-        exit(EXIT_FAILURE);
-    }
-
-    if (EVP_PKEY_CTX_set_rsa_keygen_bits(pctx, 2048) <= 0)
-    {
-        cerr << "[-]EVP_PKEY_CTX_set_rsa_keygen_bits failed" << endl;
-        ERR_print_errors_fp(stderr);
-        EVP_PKEY_CTX_free(pctx);
-        exit(EXIT_FAILURE);
-    }
-
-    EVP_PKEY* pkey = NULL;
-    if (EVP_PKEY_keygen(pctx, &pkey) <= 0)
-    {
-        cerr << "[-]EVP_PKEY_keygen failed" << endl;
-        ERR_print_errors_fp(stderr);
-        EVP_PKEY_CTX_free(pctx);
-        exit(EXIT_FAILURE);
-    }
-
-    EVP_PKEY_CTX_free(pctx);
-    return pkey;
-}
-
-void configureContext(SSL_CTX* ctx, X509* cert, EVP_PKEY* pkey)
-{
-    SSL_CTX_set_ecdh_auto(ctx, 1);
-
-    if (SSL_CTX_use_certificate(ctx, cert) <= 0)
-    {
-        cerr << "[-]Error using certificate" << endl;
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
-    }
-    else if (verbose)
-    {
-        cout << "[+]Certificate used" << endl;
-    }
-
-    if (SSL_CTX_use_PrivateKey(ctx, pkey) <= 0)
-    {
-        cerr << "[-]Error using private key" << endl;
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
-    }
-    else if (verbose)
-    {
-        cout << "[+]Private key used" << endl;
-    }
-}
-
-SOCKET createSocket(int port)
-{
-    SOCKET socket;
-    SOCKADDR_IN sockAddr;
-
-    socket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
-    if (socket == INVALID_SOCKET)
-    {
-        cerr << "[-]WSASocket failed" << endl;
-        exit(EXIT_FAILURE);
-    }
-
-    ZeroMemory(&sockAddr, sizeof(sockAddr));
-    sockAddr.sin_family = AF_INET;
-    sockAddr.sin_port = htons(port);
-    sockAddr.sin_addr.s_addr = INADDR_ANY;
-
-    int opt = 0;
-    int size = sizeof(int);
-
-    if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, size) != SOCKET_ERROR)
-    {
-        //cout << "[+]setsockopt()" << endl;
-    }
-
-    if (bind(socket, (SOCKADDR*)&sockAddr, sizeof(sockAddr)) != 0)
-    {
-        cerr << "[-]Unable to bind" << endl;
-        closesocket(socket);
-        WSACleanup();
-        exit(EXIT_FAILURE);
-    }
-
-    if (listen(socket, SOMAXCONN) != 0)
-    {
-        cerr << "[-]Unable to listen: " << WSAGetLastError() << endl;
-        closesocket(socket);
-        WSACleanup();
-        exit(EXIT_FAILURE);
-    }
-    else if (verbose)
-    {
-        cout << "[+]Listening on port " << port << "..." << endl;
-    }
-
-    return socket;
-}
-
 LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERATION ioOperation)
 {
     LPPER_IO_DATA ioData = new PER_IO_DATA;
@@ -386,359 +210,6 @@ LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERAT
     }
 
     return ioData;
-}
-
-SOCKET connectToTarget(const string& hostname, int port)
-{
-    SOCKET sock;
-    struct addrinfo hints, * res, * p;
-    char port_str[6];
-    snprintf(port_str, sizeof(port_str), "%d", port);
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (getaddrinfo(hostname.c_str(), port_str, &hints, &res) != 0)
-    {
-        cerr << "getaddrinfo" << endl;
-        exit(EXIT_FAILURE);
-    }
-
-    for (p = res; p != NULL; p = p->ai_next)
-    {
-        sock = WSASocket(p->ai_family, p->ai_socktype, p->ai_protocol, NULL, 0, WSA_FLAG_OVERLAPPED);
-        if (sock == INVALID_SOCKET)
-        {
-            cerr << "[-]Invalid socket" << endl;
-            continue;
-        }
-
-        if (WSAConnect(sock, p->ai_addr, p->ai_addrlen, NULL, NULL, NULL, NULL) == SOCKET_ERROR)
-        {
-            closesocket(sock);
-            continue;
-        }
-        cout << "[+]Connected to target server: " << hostname << " on port - " << port_str << endl;
-
-        break;
-    }
-
-    if (p == NULL)
-    {
-        cerr << "[-]Unable to connect to target server: " << hostname << endl;
-        freeaddrinfo(res);
-        exit(EXIT_FAILURE);
-    }
-
-    freeaddrinfo(res);
-    return sock;
-}
-
-bool parseConnectRequest(const string& request, string& hostname, int& port)
-{
-    size_t pos = request.find("CONNECT ");
-    if (pos == string::npos)
-        return false;
-    pos += 8;
-    size_t end = request.find(" ", pos);
-    if (end == string::npos)
-        return false;
-
-    string hostport = request.substr(pos, end - pos);
-    pos = hostport.find(":");
-    if (pos == string::npos)
-        return false;
-
-    hostname = hostport.substr(0, pos);
-    port = stoi(hostport.substr(pos + 1));
-    return true;
-}
-
-string extractHost(const string& request)
-{
-    size_t pos = request.find("Host: ");
-    if (pos == string::npos)
-        return "";
-    pos += 6;
-    size_t end = request.find("\r\n", pos);
-    return request.substr(pos, end - pos);
-}
-
-ASN1_INTEGER* generate_serial()
-{
-    ASN1_INTEGER* serial = ASN1_INTEGER_new();
-    if (!serial)
-    {
-        cerr << "ASN1_INTEGER_new failed" << endl;
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
-    }
-
-    // Generate a random 64-bit integer for the serial number
-    uint64_t serial_number = 0;
-    if (!RAND_bytes((unsigned char*)&serial_number, sizeof(serial_number)))
-    {
-        cerr << "RAND_bytes failed" << endl;
-        ERR_print_errors_fp(stderr);
-        ASN1_INTEGER_free(serial);
-        exit(EXIT_FAILURE);
-    }
-
-    // Convert the random number to ASN1_INTEGER
-    if (!ASN1_INTEGER_set_uint64(serial, serial_number))
-    {
-        cerr << "ASN1_INTEGER_set_uint64 failed" << endl;
-        ERR_print_errors_fp(stderr);
-        ASN1_INTEGER_free(serial);
-        exit(EXIT_FAILURE);
-    }
-
-    return serial;
-}
-
-X509* generate_certificate(const char* server_name, EVP_PKEY* pkey, X509* ca_cert, EVP_PKEY* ca_pkey)
-{
-    X509* x509 = X509_new();
-    if (!x509)
-    {
-        cerr << "Unable to create new X509 object" << endl;
-        return nullptr;
-    }
-
-    // Set version to X509v3
-    X509_set_version(x509, 2);
-
-    // Set serial number
-    ASN1_INTEGER* serial = generate_serial();
-    X509_set_serialNumber(x509, serial);
-    ASN1_INTEGER_free(serial);
-
-    // Set validity period
-    X509_gmtime_adj(X509_get_notBefore(x509), 0);
-    X509_gmtime_adj(X509_get_notAfter(x509), 31536000L); // 1 year
-
-    // Set public key
-    X509_set_pubkey(x509, pkey);
-
-    X509_NAME* name = X509_get_subject_name(x509);
-    X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, (unsigned char*)"US", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "ST", MBSTRING_ASC, (unsigned char*)"State", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "L", MBSTRING_ASC, (unsigned char*)"City", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (unsigned char*)"Organization", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char*)server_name, -1, -1, 0);
-    X509_set_issuer_name(x509, X509_get_subject_name(ca_cert));
-
-    // Sign the certificate with the CA private key
-    if (!X509_sign(x509, ca_pkey, EVP_sha256()))
-    {
-        cerr << "Unable to sign certificate" << endl;
-        X509_free(x509);
-        return nullptr;
-    }
-
-    if (verbose)
-    {
-        cout << "[+]Created certificate for proxy" << endl;
-    }
-
-    return x509;
-}
-
-int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
-{
-    const char* servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-    if (servername)
-    {
-        if (verbose)
-        {
-            cout << "[=]SNI: " << servername << endl;
-        }
-        ioData->hostname = servername;
-
-        // Generate key for new certificate
-        ioData->pkey = EVP_PKEY_new();
-        RSA* rsa = RSA_generate_key(2048, RSA_F4, NULL, NULL);
-        EVP_PKEY_assign_RSA(ioData->pkey, rsa);
-
-        // Generate new certificate
-        /*X509* cert = generate_certificate(servername, pkey, caCert, caKey);*/
-        ioData->clientCert = create_certificate(caCert, caKey, ioData->pkey, ioData->targetCert, ioData->hostname);
-
-        // Assign new certificate and private key to SSL context
-        SSL_use_certificate(ssl, ioData->clientCert);
-        SSL_use_PrivateKey(ssl, ioData->pkey);
-
-    }
-    else
-    {
-        cerr << "[-]No SNI" << endl;
-    }
-    return SSL_TLSEXT_ERR_OK;
-}
-
-void SSL_CTX_keylog_callback_func(const SSL* ssl, const char* line)
-{
-    FILE* fp;
-    fp = fopen("C:\\Users\\user\\OneDrive\\Desktop\\Wireshark Example\\key_logs\\key_log.log", "a");
-
-    if (fp != NULL)
-    {
-        fprintf(fp, "%s\n", line);
-        fclose(fp);
-    }
-    else
-    {
-        cout << "Failed to create log" << endl;
-    }
-}
-
-vector<string> get_sans(X509* cert)
-{
-    vector<string> sans;
-    STACK_OF(GENERAL_NAME)* names = NULL;
-
-    names = (STACK_OF(GENERAL_NAME)*)X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
-    if (names == NULL)
-    {
-        return sans;
-    }
-
-    int num_names = sk_GENERAL_NAME_num(names);
-    for (int i = 0; i < num_names; i++)
-    {
-        GENERAL_NAME* gen_name = sk_GENERAL_NAME_value(names, i);
-        if (gen_name->type == GEN_DNS)
-        {
-            char* dns_name = (char*)ASN1_STRING_get0_data(gen_name->d.dNSName);
-            sans.push_back(string(dns_name));
-        }
-    }
-    sk_GENERAL_NAME_pop_free(names, GENERAL_NAME_free);
-    return sans;
-}
-
-void myInfoCallback(const SSL* ssl, int type, int ret) {
-    switch (type) {
-    case SSL_CB_HANDSHAKE_START:
-        cout << "[=]Handshake started" << endl;
-        break;
-    case SSL_CB_HANDSHAKE_DONE:
-        cout << "[=]Handshake completed" << endl;
-        break;
-    case SSL_CB_LOOP:
-        cout << "[=]change inside loop" << endl;
-        break;
-    case SSL_CB_EXIT:
-        cout << "[=]Exit out of handshake" << endl;
-        break;
-    case SSL_CB_ALERT:
-        cout << "[=]Alert in handshake" << endl;
-        break;
-    default:
-        //cout << "[=]Info callback - " << type << endl;
-        break;
-    }
-}
-
-string get_cn(X509* cert) {
-    X509_NAME* subj = X509_get_subject_name(cert);
-    char cn[256];
-    X509_NAME_get_text_by_NID(subj, NID_commonName, cn, sizeof(cn));
-    return string(cn);
-}
-
-X509* create_certificate(X509* ca_cert, EVP_PKEY* ca_pkey, EVP_PKEY* pkey, X509* target_cert, string hostname)
-{
-    X509* cert = X509_new();
-    if (!cert)
-    {
-        cerr << "X509_new failed" << endl;
-        ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
-    }
-
-    X509_set_version(cert, 2);
-
-    ASN1_INTEGER* serial = generate_serial();
-    X509_set_serialNumber(cert, serial);
-    if (verbose)
-    {
-        cout << "[+]Serial assigned" << endl;
-    }
-    ASN1_INTEGER_free(serial);
-
-    X509_gmtime_adj(X509_get_notBefore(cert), 0);
-    X509_gmtime_adj(X509_get_notAfter(cert), 31536000L);  // 1 year validity
-
-    X509_set_pubkey(cert, pkey);
-
-    X509_NAME* name = X509_get_subject_name(cert);
-    X509_NAME_add_entry_by_txt(name, "C", MBSTRING_ASC, (unsigned char*)"US", -1, -1, 0);
-    X509_NAME_add_entry_by_txt(name, "O", MBSTRING_ASC, (unsigned char*)"Proxy", -1, -1, 0);
-
-    // Extract CN and SANs from target certificate
-    vector<string> sans = get_sans(target_cert);
-
-    // Set CN
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, (unsigned char*)hostname.c_str(), -1, -1, 0);
-    X509_set_issuer_name(cert, X509_get_subject_name(ca_cert));
-
-    // Add SANs
-    if (!sans.empty())
-    {
-        STACK_OF(GENERAL_NAME)* san_list = sk_GENERAL_NAME_new_null();
-        for (const string& san : sans)
-        {
-            GENERAL_NAME* gen_name = GENERAL_NAME_new();
-            ASN1_IA5STRING* ia5 = ASN1_IA5STRING_new();
-            ASN1_STRING_set(ia5, san.c_str(), san.size());
-            gen_name->d.dNSName = ia5;
-            gen_name->type = GEN_DNS;
-            sk_GENERAL_NAME_push(san_list, gen_name);
-        }
-
-        X509_EXTENSION* ext = X509V3_EXT_i2d(NID_subject_alt_name, 0, san_list);
-        X509_add_ext(cert, ext, -1);
-        X509_EXTENSION_free(ext);
-        sk_GENERAL_NAME_pop_free(san_list, GENERAL_NAME_free);
-    }
-
-    if (!X509_sign(cert, ca_pkey, EVP_sha256()))
-    {
-        cerr << "[-]Error signing certificate" << endl;
-        ERR_print_errors_fp(stderr);
-        X509_free(cert);
-        exit(EXIT_FAILURE);
-    }
-
-    return cert;
-}
-
-string toHex (const char* data, size_t length)
-{
-    ostringstream oss;
-    
-    for (size_t i = 0; i < length; i+=16)
-    {
-        oss << setw(4) << setfill('0') << hex << i << " ";
-
-        for (size_t j = 0; j < 16; j++)
-        {
-            if (i + j < length)
-            {
-                oss << setw(2) << static_cast<unsigned int>(static_cast<unsigned char>(data[i + j])) << " ";
-            }
-            else 
-            {
-                oss << "   ";
-            }
-        }
-
-        oss << "\n";
-    }
-
-    return oss.str();
 }
 
 static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
@@ -807,7 +278,9 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         {
                             cerr << "[-]CreateIoCompletionPort for server failed" << endl;
                             closesocket(ioData->serverSocket);
+                            ioData->serverSocket = INVALID_SOCKET;
                             closesocket(ioData->clientSocket);
+                            ioData->clientSocket = INVALID_SOCKET;
                             delete ioData;
                             break;
                         }
@@ -838,7 +311,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     SSL_CTX* targetCTX = SSL_CTX_new(TLS_client_method());
                     ioData->targetSSL = SSL_new(targetCTX);
                     SSL_set_connect_state(ioData->targetSSL); // to act as CLIENT
-                    SSL_CTX_set_verify(targetCTX, SSL_VERIFY_PEER, NULL);
+                    SSL_CTX_set_verify(targetCTX, SSL_VERIFY_NONE, NULL);
                     SSL_set_bio(ioData->targetSSL, ioData->srBio, ioData->swBio);
 
                     char response[] = "HTTP/1.1 200 Connection Established\r\n\r\n";
@@ -852,7 +325,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                             cerr << "[-]Failed to send response - " << error << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
-                            SSL_free(ioData->targetSSL);
                             delete ioData;
                             break;
                         }
@@ -897,7 +369,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                             cerr << "[-]Failed to send response - " << error << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
-                            SSL_free(ioData->targetSSL);
                             delete ioData;
                             break;
                         }
@@ -925,7 +396,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     cerr << "[-]Failed to send response - " << error << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
-                    SSL_free(ioData->targetSSL);
                     delete ioData;
                     continue;
                 }
@@ -954,7 +424,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     cerr << "[-]Failed to send response - " << error << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
-                    SSL_free(ioData->targetSSL);
                     delete ioData;
                     continue;
                 }
@@ -980,7 +449,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     cerr << "[-]Failed to send response - " << error << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
-                    SSL_free(ioData->targetSSL);
                     delete ioData;
                     continue;
                 }
@@ -1017,10 +485,10 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
                 if (ret_server == 1)
                 {
-                    if (verbose)
+                    /*if (verbose)
                     {
                         cout << "[+]SSL handshake with server done" << endl;
-                    }
+                    }*/
 
                     // SSL handshake with client
                     ioData->ioOperation = SSL_CLIENT_IO;
@@ -1060,9 +528,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                                 cout << "[-]WSARecv() failed - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
-                                SSL_free(ioData->clientSSL);
-                                SSL_free(ioData->targetSSL);
-                                SSL_CTX_free(ioData->clientCTX);
                                 delete ioData;
                                 break;
                             }
@@ -1104,7 +569,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                                 cerr << "[-]WSASend error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
-                                SSL_free(ioData->targetSSL);
                                 delete ioData;
                                 break;
                             }
@@ -1122,13 +586,12 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         if (WSARecv(ioData->serverSocket, &ioData->wsaServerRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
                         {
                             int error = WSAGetLastError();
-                            //cout << "[-]WSARecv error - " << error << endl;
+                            cout << "[-]WSARecv error - " << error << endl;
                             if (error != WSA_IO_PENDING)
                             {
                                 cerr << "[-]WSARecv error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
-                                SSL_free(ioData->targetSSL);
                                 delete ioData;
                                 break;
                             }
@@ -1182,10 +645,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 ret_client = SSL_do_handshake(ioData->clientSSL);
 
                 if (ret_client == 1) {
-                    /*if (verbose)
-                    {
-                        cout << "[+]SSL handshake with client done" << endl;
-                    }*/
 
                     ioData->ioOperation = IO;
                     ioData->clientRecvFlag = TRUE;
@@ -1199,9 +658,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                             cerr << "[-]WSARecv() failed" << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
-                            SSL_free(ioData->clientSSL);
-                            SSL_free(ioData->targetSSL);
-                            SSL_CTX_free(ioData->clientCTX);
                             delete ioData;
                             break;
                         }
@@ -1235,15 +691,12 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         if (WSASend(ioData->clientSocket, &ioData->wsaClientSendBuf, 1, &ioData->bytesSend, 0, &ioData->overlapped, NULL) == SOCKET_ERROR)
                         {
                             int error = WSAGetLastError();
-                            //cout << "[-]WSASend() error - " << error << endl;
+                            cout << "[-]WSASend() error - " << error << endl;
                             if (error != WSA_IO_PENDING)
                             {
                                 cerr << "[-]WSASend() error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
-                                SSL_free(ioData->clientSSL);
-                                SSL_free(ioData->targetSSL);
-                                SSL_CTX_free(ioData->clientCTX);
                                 delete ioData;
                                 break;
                             }
@@ -1268,9 +721,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                                 cerr << "[-]WSARecv() error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
-                                SSL_free(ioData->clientSSL);
-                                SSL_free(ioData->targetSSL);
-                                SSL_CTX_free(ioData->clientCTX);
                                 delete ioData;
                                 break;
                             }
@@ -1435,9 +885,6 @@ BOOL IOUtil(LPPER_IO_DATA ioData, MODE mode, int bytesTransferred)
                             cerr << "[-]WSARecv() client IO - " << error << " ID - " << ioData->key  << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
-                            SSL_free(ioData->clientSSL);
-                            SSL_free(ioData->targetSSL);
-                            SSL_CTX_free(ioData->clientCTX);
                             delete ioData;
                             return FALSE;
                         }
@@ -1544,9 +991,6 @@ BOOL IOUtil(LPPER_IO_DATA ioData, MODE mode, int bytesTransferred)
                             cerr << "[-]WSARecv() server IO - " << error << " ID - " << ioData->key << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
-                            SSL_free(ioData->clientSSL);
-                            SSL_free(ioData->targetSSL);
-                            SSL_CTX_free(ioData->clientCTX);
                             delete ioData;
                             return FALSE;
                         }
@@ -1649,9 +1093,6 @@ BOOL BioUtil(LPPER_IO_DATA ioData, MODE mode)
                     cerr << "[-]WSASend() failed - " << error << " ID - " << ioData->key << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
-                    SSL_free(ioData->clientSSL);
-                    SSL_free(ioData->targetSSL);
-                    SSL_CTX_free(ioData->clientCTX);
                     delete ioData;
                     return FALSE;
                 }
@@ -1682,9 +1123,6 @@ BOOL BioUtil(LPPER_IO_DATA ioData, MODE mode)
                     cerr << "[-]WSARecv() server BIO - " << error << " ID - " << ioData->key << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
-                    SSL_free(ioData->clientSSL);
-                    SSL_free(ioData->targetSSL);
-                    SSL_CTX_free(ioData->clientCTX);
                     delete ioData;
                     return FALSE;
                 }
@@ -1719,9 +1157,6 @@ BOOL BioUtil(LPPER_IO_DATA ioData, MODE mode)
                     cerr << "[-]WSASend() client - " << error << " ID - " << ioData->key << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
-                    SSL_free(ioData->clientSSL);
-                    SSL_free(ioData->targetSSL);
-                    SSL_CTX_free(ioData->clientCTX);
                     delete ioData;
                     return FALSE;
                 }
@@ -1751,9 +1186,6 @@ BOOL BioUtil(LPPER_IO_DATA ioData, MODE mode)
                     cerr << "[-]WSARecv() client BIO - " << error << " ID - " << ioData->key << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
-                    SSL_free(ioData->clientSSL);
-                    SSL_free(ioData->targetSSL);
-                    SSL_CTX_free(ioData->clientCTX);
                     delete ioData;
                     return FALSE;
                 }
@@ -1769,17 +1201,4 @@ BOOL BioUtil(LPPER_IO_DATA ioData, MODE mode)
     }
     
     return TRUE;
-}
-
-void cleanupSSL() 
-{
-    EVP_PKEY_free(caKey);
-    X509_free(caCert);
-    EVP_cleanup();
-    ERR_free_strings();
-    CRYPTO_cleanup_all_ex_data();
-    if (verbose)
-    {
-        cout << "[+]OpenSSL cleaned up" << endl;
-    }
 }
