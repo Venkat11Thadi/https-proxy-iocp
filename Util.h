@@ -6,8 +6,6 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <thread>
-#include <vector>
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
@@ -15,15 +13,13 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+#include <string>
+#include <thread>
+#include <vector>
+#include <winsock2.h>
+#include <WS2tcpip.h>
 
 using namespace std;
-
-#pragma comment(lib, "libssl.lib")
-#pragma comment(lib, "libcrypto.lib")
-
-#pragma warning(disable : 4996)
-
-#define BUFFER_SIZE 4096
 
 void initializeWinsock()
 {
@@ -34,7 +30,7 @@ void initializeWinsock()
         cerr << "[-]WSAStartup failed - " << result << endl;
         exit(EXIT_FAILURE);
     }
-    else if (verbose)
+    else
     {
         cout << "[+]Winsock initialized" << endl;
     }
@@ -44,25 +40,8 @@ void initializeOpenSSL()
 {
     SSL_library_init();
     SSL_load_error_strings();
-    ERR_load_BIO_strings();
     OpenSSL_add_ssl_algorithms();
-    if (verbose)
-    {
-        cout << "[+]OpenSSL initialized" << endl;
-    }
-}
-
-void cleanupSSL()
-{
-    EVP_PKEY_free(caKey);
-    X509_free(caCert);
-    EVP_cleanup();
-    ERR_free_strings();
-    CRYPTO_cleanup_all_ex_data();
-    if (verbose)
-    {
-        cout << "[+]OpenSSL cleaned up" << endl;
-    }
+    cout << "[+]OpenSSL initialized" << endl;
 }
 
 string toHex(const char* data, size_t length)

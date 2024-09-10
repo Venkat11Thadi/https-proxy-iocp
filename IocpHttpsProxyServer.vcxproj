@@ -132,7 +132,6 @@
     <ClCompile Include="IocpHttpsProxyServer.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="IocpHttp.h" />
     <ClInclude Include="SslUtil.h" />
     <ClInclude Include="Util.h" />
   </ItemGroup>

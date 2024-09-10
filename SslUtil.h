@@ -6,8 +6,6 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <thread>
-#include <vector>
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
@@ -15,15 +13,138 @@
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
+#include <string>
+#include <thread>
+#include <vector>
+#include <winsock2.h>
+#include <WS2tcpip.h>
 
 using namespace std;
 
-#pragma comment(lib, "libssl.lib")
-#pragma comment(lib, "libcrypto.lib")
+SOCKET createSocket(int port)
+{
+    SOCKET socket;
+    SOCKADDR_IN sockAddr;
 
-#pragma warning(disable : 4996)
+    socket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+    if (socket == INVALID_SOCKET)
+    {
+        cerr << "[-]WSASocket failed" << endl;
+        exit(EXIT_FAILURE);
+    }
 
-#define BUFFER_SIZE 4096
+    ZeroMemory(&sockAddr, sizeof(sockAddr));
+    sockAddr.sin_family = AF_INET;
+    sockAddr.sin_port = htons(port);
+    sockAddr.sin_addr.s_addr = INADDR_ANY;
+
+    int opt = 0;
+    int size = sizeof(int);
+
+    if (setsockopt(socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, size) != SOCKET_ERROR)
+    {
+        //cout << "[+]setsockopt()" << endl;
+    }
+
+    if (bind(socket, (SOCKADDR*)&sockAddr, sizeof(sockAddr)) != 0)
+    {
+        cerr << "[-]Unable to bind" << endl;
+        closesocket(socket);
+        WSACleanup();
+        exit(EXIT_FAILURE);
+    }
+
+    if (listen(socket, SOMAXCONN) != 0)
+    {
+        cerr << "[-]Unable to listen: " << WSAGetLastError() << endl;
+        closesocket(socket);
+        WSACleanup();
+        exit(EXIT_FAILURE);
+    }
+    else
+    {
+        cout << "[+]Listening on port " << port << "..." << endl;
+    }
+
+    return socket;
+}
+
+SOCKET connectToTarget(const string& hostname, int port)
+{
+    SOCKET sock;
+    struct addrinfo hints, * res, * p;
+    char port_str[6];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    if (getaddrinfo(hostname.c_str(), port_str, &hints, &res) != 0)
+    {
+        cerr << "getaddrinfo" << endl;
+        exit(EXIT_FAILURE);
+    }
+
+    for (p = res; p != NULL; p = p->ai_next)
+    {
+        sock = WSASocket(p->ai_family, p->ai_socktype, p->ai_protocol, NULL, 0, WSA_FLAG_OVERLAPPED);
+        if (sock == INVALID_SOCKET)
+        {
+            cerr << "[-]Invalid socket" << endl;
+            continue;
+        }
+
+        if (WSAConnect(sock, p->ai_addr, p->ai_addrlen, NULL, NULL, NULL, NULL) == SOCKET_ERROR)
+        {
+            closesocket(sock);
+            continue;
+        }
+        cout << "[+]Connected to target server: " << hostname << " on port - " << port_str << endl;
+
+        break;
+    }
+
+    if (p == NULL)
+    {
+        cerr << "[-]Unable to connect to target server: " << hostname << endl;
+        freeaddrinfo(res);
+        exit(EXIT_FAILURE);
+    }
+
+    freeaddrinfo(res);
+    return sock;
+}
+
+bool parseConnectRequest(const string& request, string& hostname, int& port)
+{
+    size_t pos = request.find("CONNECT ");
+    if (pos == string::npos)
+        return false;
+    pos += 8;
+    size_t end = request.find(" ", pos);
+    if (end == string::npos)
+        return false;
+
+    string hostport = request.substr(pos, end - pos);
+    pos = hostport.find(":");
+    if (pos == string::npos)
+        return false;
+
+    hostname = hostport.substr(0, pos);
+    port = stoi(hostport.substr(pos + 1));
+    return true;
+}
+
+string extractHost(const string& request)
+{
+    size_t pos = request.find("Host: ");
+    if (pos == string::npos)
+        return "";
+    pos += 6;
+    size_t end = request.find("\r\n", pos);
+    return request.substr(pos, end - pos);
+}
 
 EVP_PKEY* generatePrivateKey()
 {
@@ -74,7 +195,7 @@ void configureContext(SSL_CTX* ctx, X509* cert, EVP_PKEY* pkey)
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
-    else if (verbose)
+    else
     {
         cout << "[+]Certificate used" << endl;
     }
@@ -85,7 +206,7 @@ void configureContext(SSL_CTX* ctx, X509* cert, EVP_PKEY* pkey)
         ERR_print_errors_fp(stderr);
         exit(EXIT_FAILURE);
     }
-    else if (verbose)
+    else
     {
         cout << "[+]Private key used" << endl;
     }
@@ -121,38 +242,6 @@ ASN1_INTEGER* generate_serial()
     }
 
     return serial;
-}
-
-int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
-{
-    const char* servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
-    if (servername)
-    {
-        if (verbose)
-        {
-            cout << "[=]SNI: " << servername << endl;
-        }
-        ioData->hostname = servername;
-
-        // Generate key for new certificate
-        ioData->pkey = EVP_PKEY_new();
-        RSA* rsa = RSA_generate_key(2048, RSA_F4, NULL, NULL);
-        EVP_PKEY_assign_RSA(ioData->pkey, rsa);
-
-        // Generate new certificate
-        /*X509* cert = generate_certificate(servername, pkey, caCert, caKey);*/
-        ioData->clientCert = create_certificate(caCert, caKey, ioData->pkey, ioData->targetCert, ioData->hostname);
-
-        // Assign new certificate and private key to SSL context
-        SSL_use_certificate(ssl, ioData->clientCert);
-        SSL_use_PrivateKey(ssl, ioData->pkey);
-
-    }
-    else
-    {
-        cerr << "[-]No SNI" << endl;
-    }
-    return SSL_TLSEXT_ERR_OK;
 }
 
 vector<string> get_sans(X509* cert)
@@ -201,10 +290,9 @@ X509* create_certificate(X509* ca_cert, EVP_PKEY* ca_pkey, EVP_PKEY* pkey, X509*
 
     ASN1_INTEGER* serial = generate_serial();
     X509_set_serialNumber(cert, serial);
-    if (verbose)
-    {
-        cout << "[+]Serial assigned" << endl;
-    }
+        
+    cout << "[+]Serial assigned" << endl;
+
     ASN1_INTEGER_free(serial);
 
     X509_gmtime_adj(X509_get_notBefore(cert), 0);
@@ -255,3 +343,4 @@ X509* create_certificate(X509* ca_cert, EVP_PKEY* ca_pkey, EVP_PKEY* pkey, X509*
 
     return cert;
 }
+
