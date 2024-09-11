@@ -14,7 +14,6 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <string>
-#include <thread>
 #include <vector>
 #include <winsock2.h>
 #include <WS2tcpip.h>

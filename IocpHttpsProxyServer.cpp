@@ -38,8 +38,8 @@ HANDLE ProxyCompletionPort;
 X509* caCert;
 EVP_PKEY* caKey;
 
-bool verbose = true;
-static int ID = 0;
+BOOL verbose = TRUE;
+static INT ID = 0;
 
 typedef enum _IO_OPERATION
 {
@@ -82,7 +82,7 @@ typedef struct _PER_IO_DATA
 
 LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERATION ioOperation);
 static DWORD WINAPI WorkerThread(LPVOID lparameter);
-void cleanupSSL(void);
+VOID cleanupSSL(VOID);
 
 int main()
 {
@@ -725,6 +725,11 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
                     SSL_CTX* targetCTX = SSL_CTX_new(TLS_client_method());
                     ioData->targetSSL = SSL_new(targetCTX);
+                    if (!SSL_set_tlsext_host_name(ioData->targetSSL, ioData->hostname.c_str())) {
+                        cout << "[-]SSL_set_tlsext_host_name() failed" << endl;
+                        ERR_print_errors_fp(stderr);
+                        break;
+                    }
                     SSL_set_connect_state(ioData->targetSSL); // to act as CLIENT
                     SSL_CTX_set_verify(targetCTX, SSL_VERIFY_NONE, NULL);
                     SSL_set_bio(ioData->targetSSL, ioData->srBio, ioData->swBio);
@@ -805,7 +810,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             if (WSARecv(ioData->serverSocket, &ioData->wsaServerRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
             {
                 int error = WSAGetLastError();
-                //cout << "[-]WSARecv - " << error << endl;
+                cout << "[-]WSARecv() HTTP_S_RECV - " << error << endl;
                 if (error != WSA_IO_PENDING)
                 {
                     cerr << "[-]Failed to send response - " << error << endl;
@@ -818,7 +823,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             else
             {
                 cout << "[+]WSARecv() HTTP_S_RECV - " << ioData->bytesRecv << " bytes." << endl;
-                //cout << ioData->sRecvBuffer << endl;
             }
 
             break;
@@ -1217,7 +1221,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 {
                     cout << "[+]WSARecv() client IO (out) - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
                 }
-                
+
                 break;
             }
 
@@ -1244,7 +1248,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 {
                     cout << "[+]WSARecv() server IO (out) - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
                 }
-                
+
                 break;
             }
 
