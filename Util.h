@@ -89,19 +89,19 @@ void SSL_CTX_keylog_callback_func(const SSL* ssl, const char* line)
 void myInfoCallback(const SSL* ssl, int type, int ret) {
     switch (type) {
     case SSL_CB_HANDSHAKE_START:
-        cout << "[=]Handshake started" << endl;
+        //cout << "[=]Handshake started" << endl;
         break;
     case SSL_CB_HANDSHAKE_DONE:
-        cout << "[=]Handshake completed" << endl;
+        //cout << "[=]Handshake completed" << endl;
         break;
     case SSL_CB_LOOP:
-        cout << "[=]change inside loop" << endl;
+        //cout << "[=]change inside loop" << endl;
         break;
     case SSL_CB_EXIT:
-        cout << "[=]Exit out of handshake" << endl;
+        //cout << "[=]Exit out of handshake" << endl;
         break;
     case SSL_CB_ALERT:
-        cout << "[=]Alert in handshake" << endl;
+        //cout << "[=]Alert in handshake" << endl;
         break;
     default:
         //cout << "[=]Info callback - " << type << endl;

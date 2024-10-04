@@ -99,7 +99,7 @@ SOCKET connectToTarget(const string& hostname, int port)
             closesocket(sock);
             continue;
         }
-        cout << "[+]Connected to target server: " << hostname << " on port - " << port_str << endl;
+        //cout << "[+]Connected to target server: " << hostname << " on port - " << port_str << endl;
 
         break;
     }
@@ -290,7 +290,7 @@ X509* create_certificate(X509* ca_cert, EVP_PKEY* ca_pkey, EVP_PKEY* pkey, X509*
     ASN1_INTEGER* serial = generate_serial();
     X509_set_serialNumber(cert, serial);
         
-    cout << "[+]Serial assigned" << endl;
+    //cout << "[+]Serial assigned" << endl;
 
     ASN1_INTEGER_free(serial);
 
