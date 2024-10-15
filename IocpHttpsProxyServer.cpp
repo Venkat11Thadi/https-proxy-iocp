@@ -20,6 +20,7 @@
 #include <vector>
 #include <winsock2.h>
 #include <WS2tcpip.h>
+#include <Windows.h>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "libssl.lib")
@@ -28,43 +29,24 @@
 #include "Util.h"
 #include "SslUtil.h"
 
-//#include "spdlog/sinks/basic_file_sink.h"
-//
-//void basic_logfile_example()
-//{
-//    try
-//    {
-//        auto logger = spdlog::basic_logger_mt("basic_logger", "C:\\Users\\user\\OneDrive\\Desktop\\output_logs.txt");
-//    }
-//    catch (const spdlog::spdlog_ex& ex)
-//    {
-//        std::cout << "Log init failed: " << ex.what() << std::endl;
-//    }
-//}
-
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/basic_file_sink.h"
-//#include "spdlog/fmt/bin_to_hex.h"
-//
-//void binary_example()
-//{
-//    auto console = spdlog::get("console");
-//    std::array<char, 80> buf;
-//    console->info("Binary example: {}", spdlog::to_hex(buf));
-//    console->info("Another binary example:{:n}", spdlog::to_hex(std::begin(buf), std::begin(buf) + 10));
-//}
 
 void replace_default_logger_example()
 {
     auto new_logger = spdlog::basic_logger_mt("new_default_logger", "C:\\Users\\user\\OneDrive\\Desktop\\output_logs.txt", true);
     spdlog::set_default_logger(new_logger);
     spdlog::flush_every(std::chrono::seconds(3));
-    //spdlog::info("new logger log message");
 }
 
 using namespace std;
 
 #pragma warning(disable : 4996)
+
+#define SERVICE_NAME TEXT("Example Service")
+SERVICE_STATUS			ServiceStatus = { 0 };
+SERVICE_STATUS_HANDLE	hServiceStatusHandle = NULL;
+HANDLE					hServiceEvent = NULL;
 
 #define BUFFER_SIZE 4096
 #define PORT        8080
@@ -72,6 +54,7 @@ using namespace std;
 HANDLE ProxyCompletionPort;
 X509* caCert;
 EVP_PKEY* caKey;
+SOCKET proxySocket;
 
 BOOL verbose = TRUE;
 static INT ID = 0;
@@ -118,9 +101,69 @@ typedef struct _PER_IO_DATA
 
 LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERATION ioOperation);
 static DWORD WINAPI WorkerThread(LPVOID lparameter);
+VOID StartProxyServer(VOID);
 VOID cleanupSSL(VOID);
 
-int main()
+VOID WINAPI ServiceMain(DWORD dwArgc, LPSTR* lpArgv);	// service main function
+VOID WINAPI ServiceControlHandler(DWORD dwControl);		// service control handler
+VOID ServiceReportStatus(
+    DWORD dwCurrentState,
+    DWORD dwWin32ExitCode,
+    DWORD dwWaitHint);
+VOID ServiceInit(DWORD dwArgc, LPSTR* lpArgv);
+VOID ServiceInstall(VOID);
+VOID ServiceDelete(VOID);
+VOID ServiceStart(VOID);
+VOID ServiceStop(VOID);
+
+int main(int argc, CHAR* argv[])
+{
+    BOOL bStServiceCtrlDispatcher = FALSE;
+
+    if (lstrcmpiA(argv[1], "install") == 0)
+    {
+        ServiceInstall();
+        cout << "Installation success" << endl;
+    }
+    else if (lstrcmpiA(argv[1], "start") == 0)
+    {
+        ServiceStart();
+        cout << "start success" << endl;
+    }
+    else if (lstrcmpiA(argv[1], "stop") == 0)
+    {
+        ServiceStop();
+        cout << "stop success" << endl;
+    }
+    else if (lstrcmpiA(argv[1], "delete") == 0)
+    {
+        ServiceDelete();
+        cout << "delete success" << endl;
+    }
+    else
+    {
+        SERVICE_TABLE_ENTRY DispatchTable[] =
+        {
+            { (LPWSTR)SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain },
+            { NULL, NULL }
+        };
+
+        bStServiceCtrlDispatcher = StartServiceCtrlDispatcher(DispatchTable);
+        if (FALSE == bStServiceCtrlDispatcher)
+        {
+            cout << "bStServiceCtrlDispatcher failed " << GetLastError() << endl;
+        }
+        else
+        {
+            cout << "bStServiceCtrlDispatcher success" << endl;
+        }
+    }
+
+    system("PAUSE");
+    return 0;
+}
+
+VOID StartProxyServer()
 {
     initializeWinsock();
     initializeOpenSSL();
@@ -130,7 +173,6 @@ int main()
     if (!ca_cert_file)
     {
         spdlog::info("[-]Error opening CA certificate file");
-        //cerr << "[-]Error opening CA certificate file" << endl;
         exit(EXIT_FAILURE);
     }
 
@@ -139,7 +181,6 @@ int main()
     if (!caCert)
     {
         spdlog::info("[-]Error reading CA certificate");
-        //cerr << "[-]Error reading CA certificate" << endl;
         exit(EXIT_FAILURE);
     }
 
@@ -147,7 +188,6 @@ int main()
     if (!ca_pkey_file)
     {
         spdlog::info("[-]Error opening CA certificate file");
-        //cerr << "[-]Error opening CA private key file" << endl;
         exit(EXIT_FAILURE);
     }
 
@@ -156,7 +196,6 @@ int main()
     if (!caKey)
     {
         spdlog::info("[-]Error reading CA private key");
-        //cerr << "[-]Error reading CA private key" << endl;
         exit(EXIT_FAILURE);
     }
 
@@ -164,9 +203,8 @@ int main()
     if (!ProxyCompletionPort)
     {
         spdlog::info("[-]Cannot create ProxyCompletionPort");
-        //cerr << "[-]Cannot create ProxyCompletionPort" << endl;
         WSACleanup();
-        return 1;
+        return;
     }
 
     SYSTEM_INFO systemInfo;
@@ -177,14 +215,13 @@ int main()
         if (pThread == NULL)
         {
             spdlog::info("[-]Failed to create worker thread");
-            //cerr << "[-]Failed to create worker thread" << endl;
             WSACleanup();
-            return 1;
+            return;
         }
         CloseHandle(pThread);
     }
 
-    SOCKET proxySocket = createSocket(PORT);
+    proxySocket = createSocket(PORT);
 
     while (TRUE)
     {
@@ -192,13 +229,11 @@ int main()
         if (clientSocket == INVALID_SOCKET)
         {
             spdlog::info("[-]WSAAccept failed - {}", WSAGetLastError());
-            //cerr << "[-]WSAAccept failed - " << WSAGetLastError() << endl;
             continue;
         }
         else if (verbose)
         {
             spdlog::info("[+]client accepted");
-            //cout << "[+]client accepted" << endl;
         }
 
         struct sockaddr_in peer_addr;
@@ -206,28 +241,24 @@ int main()
 
         if (getpeername(clientSocket, (struct sockaddr*)&peer_addr, &peer_addr_len) == -1) {
             spdlog::info("[-]getpeername failed");
-            //cerr << "[-]getpeername failed" << endl;
         }
         else {
             char peer_ip[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, INET_ADDRSTRLEN);
 
             spdlog::info("[+]Connected client's Port: {}", ntohs(peer_addr.sin_port));
-            //cout << "[+]Connected client's Port: " << ntohs(peer_addr.sin_port) << endl;
         }
 
         LPPER_IO_DATA clientData = UpdateIoCompletionPort(clientSocket, INVALID_SOCKET, CLIENT_ACCEPT);
         if (!clientData)
         {
             spdlog::info("[-]UpdateIoCompletionPort failed");
-            //cerr << "[-]UpdateIoCompletionPort failed" << endl;
             closesocket(clientSocket);
             continue;
         }
         else
         {
             spdlog::info("[+]UpdateIoCompletionPort done");
-            //cout << "[+]UpdateIoCompletionPort done" << endl;
         }
 
         DWORD flags = 0;
@@ -235,11 +266,9 @@ int main()
         {
             int error = WSAGetLastError();
             spdlog::info("[-]WSARecv() pending");
-            //cout << "[-]WSARecv() pending" << endl;
             if (error != WSA_IO_PENDING)
             {
                 spdlog::info("[-]WSARecv failed - {}", error);
-                //cerr << "[-]WSARecv failed - " << error << endl;
                 closesocket(clientData->clientSocket);
                 delete clientData;
                 continue;
@@ -248,7 +277,6 @@ int main()
         else
         {
             spdlog::info("[+]From client - {} bytes.", clientData->bytesRecv);
-            //cout << "[+]From client - " << clientData->bytesRecv << " bytes." << endl;
             cout << clientData->cRecvBuffer << endl;
             clientData->bytesRecv = 0;
         }
@@ -259,7 +287,7 @@ int main()
     cleanupSSL();
     WSACleanup();
 
-    return 0;
+    return;
 }
 
 LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERATION ioOperation)
@@ -316,7 +344,6 @@ int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
         if (verbose)
         {
             spdlog::info("[=]SNI: {}", servername);
-            //cout << "[=]SNI: " << servername << endl;
         }
         ioData->hostname = servername;
 
@@ -326,7 +353,6 @@ int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
         EVP_PKEY_assign_RSA(ioData->pkey, rsa);
 
         // Generate new certificate
-        /*X509* cert = generate_certificate(servername, pkey, caCert, caKey);*/
         ioData->clientCert = create_certificate(caCert, caKey, ioData->pkey, ioData->targetCert, ioData->hostname);
 
         // Assign new certificate and private key to SSL context
@@ -337,425 +363,9 @@ int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
     else
     {
         spdlog::info("[-]No SNI");
-        //cerr << "[-]No SNI" << endl;
     }
     return SSL_TLSEXT_ERR_OK;
 }
-
-//BOOL IOUtil(LPPER_IO_DATA ioData, MODE mode, int bytesTransferred)
-//{
-//    int bioWrite = 0, bioRead = 0, sslWrite = 0, sslRead = 0, error, ret;
-//    DWORD flags = 0;
-//
-//    if (mode == CLIENT)
-//    {
-//        //cout << "[+]Bytestransferred client - " << bytesTransferred << " ID - " << ioData->key << endl;
-//        bioWrite = BIO_write(ioData->crBio, ioData->cRecvBuffer, bytesTransferred);
-//
-//        if (bioWrite > 0)
-//        {
-//            ioData->clientRecvFlag = FALSE;
-//
-//            spdlog::info("[+]BIO_write() client - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->cRecvBuffer, bioWrite));
-//            //cout << "[+]BIO_write() client - " << bioWrite << " bytes. ID - " << ioData->key << endl << toHex(ioData->cRecvBuffer, bioWrite) << endl;
-//            memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
-//
-//            sslRead = SSL_read(ioData->clientSSL, ioData->cRecvBuffer, BUFFER_SIZE);
-//
-//            if (sslRead <= 0)
-//            {
-//                error = SSL_get_error(ioData->clientSSL, sslRead);
-//                spdlog::info("[-]SSL_read error - {}. ID - {}", error, ioData->key);
-//                //cout << "[-]SSL_read error - " << error << " ID - " << ioData->key << endl;
-//
-//                if ((error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) && !ioData->clientRecvFlag)
-//                {
-//                    ioData->bytesRecv = 0;
-//                    ioData->clientRecvFlag = TRUE;
-//                    memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
-//
-//                    if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-//                    {
-//                        int error = WSAGetLastError();
-//                        spdlog::info("[-]WSARecv() client IO pending. ID - {}", ioData->key);
-//                        //cout << "[-]WSARecv() client IO pending. ID - " << ioData->key << endl;
-//                        if (error != WSA_IO_PENDING)
-//                        {
-//                            spdlog::info("[-]WSARecv() client IO -  {}. ID - {}", error, ioData->key);
-//                            //cerr << "[-]WSARecv() client IO - " << error << " ID - " << ioData->key << endl;
-//                            closesocket(ioData->clientSocket);
-//                            closesocket(ioData->serverSocket);
-//                            delete ioData;
-//                            return FALSE;
-//                        }
-//                    }
-//                    else
-//                    {
-//                        spdlog::info("[+]WSARecv() client IO - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-//                        //cout << "[+]WSARecv() client IO - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
-//                    }
-//                    return FALSE;
-//                }
-//                else if (ioData->clientRecvFlag) {
-//                    spdlog::info("[-]IO operation pending");
-//                    //cout << "[-]IO operation pending" << endl;
-//                    return FALSE;
-//                }
-//                else if (error == SSL_ERROR_SSL)
-//                {
-//                    spdlog::info("[-]SSL_get_error() CLIENT_IO - {}. ID - {}", ERR_error_string(ERR_get_error(), NULL), ioData->key);
-//                    //cout << "[-]SSL_get_error() CLIENT_IO - " << ERR_error_string(ERR_get_error(), NULL) << " ID - " << ioData->key << endl;
-//                    return FALSE;
-//                }
-//                else
-//                {
-//                    spdlog::info("[+]SSL_get_error() - {}", error);
-//                    //cout << "[+]SSL_get_error() - " << error << endl;
-//                    return FALSE;
-//                }
-//            }
-//            else
-//            {
-//                if (verbose)
-//                {
-//                    spdlog::info("[+]SSL_read() client - {} bytes. ID - {}", sslRead, ioData->key);
-//                    //cout << "[+]SSL_read() client - " << sslRead << " bytes. ID - " << ioData->key << endl;
-//                }
-//                cout << ioData->cRecvBuffer << endl;
-//                sslWrite = SSL_write(ioData->targetSSL, ioData->cRecvBuffer, sslRead);
-//                if (sslWrite > 0)
-//                {
-//                    if (verbose)
-//                    {
-//                        spdlog::info("[+]SSL_write() server - {} bytes.ID - {}", sslWrite, ioData->key);
-//                        //cout << "[+]SSL_write() server - " << sslWrite << " bytes. ID - " << ioData->key << endl;
-//                    }
-//                    memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
-//                }
-//                else
-//                {
-//                    ret = SSL_get_error(ioData->targetSSL, sslWrite);
-//                    spdlog::info("[-]SSL_write() - {}. ID - {}", error, ioData->key);
-//                    //cout << "[-]SSL_write() - " << ret << endl;
-//                }
-//                while ((sslRead = SSL_read(ioData->clientSSL, ioData->cRecvBuffer, BUFFER_SIZE)) > 0)
-//                {
-//                    if (verbose)
-//                    {
-//                        spdlog::info("[+]SSL_read() client - {} bytes. ID - {}", sslRead, ioData->key);
-//                        //cout << "[+]SSL_read() client - " << sslRead << " bytes. ID - " << ioData->key << endl;
-//                    }
-//                    cout << ioData->cRecvBuffer << endl;
-//                    sslWrite = SSL_write(ioData->targetSSL, ioData->cRecvBuffer, sslRead);
-//                    if (sslWrite > 0)
-//                    {
-//                        if (verbose)
-//                        {
-//                            spdlog::info("[+]SSL_write() server - {} bytes.ID - {}", sslWrite, ioData->key);
-//                            //cout << "[+]SSL_write() - " << sslWrite << " bytes. ID - " << ioData->key << endl;
-//                        }
-//                        memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
-//                    }
-//                    else
-//                    {
-//                        ret = SSL_get_error(ioData->targetSSL, sslWrite);
-//                        spdlog::info("[+]SSL_write() server - {} bytes.ID - {}", error, ioData->key);
-//                        //cout << "[-]SSL_write() server - " << ret << endl;
-//                    }
-//                }
-//                error = SSL_get_error(ioData->clientSSL, sslRead);
-//                spdlog::info("[-]SSL_get_error() - {}. ID - {}", error, ioData->key);
-//                //cout << "[-]SSL_get_error() - " << error << endl;
-//                ioData->bioCFlag = TRUE;
-//                ioData->clientSendFlag = FALSE;
-//                return TRUE;
-//            }
-//        }
-//        else
-//        {
-//            spdlog::info("[-]BIO_write() client failed. ID - {}", ioData->key);
-//            //cout << "[-]BIO_write() client failed" << endl;
-//            return FALSE;
-//        }
-//    }
-//    else if (mode == SERVER)
-//    {
-//        //cout << "[+]Bytestransferred server - " << bytesTransferred << " ID - " << ioData->key << endl;
-//        bioWrite = BIO_write(ioData->srBio, ioData->sRecvBuffer, bytesTransferred);
-//        if (bioWrite > 0)
-//        {
-//            ioData->serverRecvFlag = FALSE;
-//
-//            spdlog::info("[+]BIO_write() server - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->sRecvBuffer, bioWrite));
-//            //cout << "[+]BIO_write() server - " << bioWrite << " bytes. ID - " << ioData->key << endl << toHex(ioData->sRecvBuffer, bioWrite) << endl;
-//            memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
-//
-//            sslRead = SSL_read(ioData->targetSSL, ioData->sRecvBuffer, BUFFER_SIZE);
-//
-//            if (sslRead <= 0)
-//            {
-//                error = SSL_get_error(ioData->targetSSL, sslRead);
-//                spdlog::info("[-]SSL_read error - {}. ID - {}", error, ioData->key);
-//                //cout << "[-]SSL_read error - " << error << " ID - " << ioData->key << endl;
-//
-//                if ((error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) && !ioData->serverRecvFlag)
-//                {
-//                    ioData->bytesRecv = 0;
-//                    ioData->serverRecvFlag = TRUE;
-//                    memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
-//
-//                    if (WSARecv(ioData->serverSocket, &ioData->wsaServerRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-//                    {
-//                        int error = WSAGetLastError();
-//                        spdlog::info("[-]WSARecv() server IO pending. ID - {}", ioData->key);
-//                        //cout << "[-]WSARecv() server IO pending. ID - " << ioData->key << endl;
-//                        if (error != WSA_IO_PENDING)
-//                        {
-//                            spdlog::info("[-]WSARecv() server IO - {}. ID - {}", error, ioData->key);
-//                            //cerr << "[-]WSARecv() server IO - " << error << " ID - " << ioData->key << endl;
-//                            closesocket(ioData->clientSocket);
-//                            closesocket(ioData->serverSocket);
-//                            delete ioData;
-//                            return FALSE;
-//                        }
-//                    }
-//                    else
-//                    {
-//                        spdlog::info("[+]WSARecv() server IO - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-//                        //cout << "[+]WSARecv() server IO - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
-//                    }
-//                    return FALSE;
-//                }
-//                else if (error == SSL_ERROR_SSL)
-//                {
-//                    spdlog::info("[-]SSL_get_error() SERVER_IO - {}. ID - {}", ERR_error_string(ERR_get_error(), NULL), ioData->key);
-//                    //cout << "[-]SSL_get_error() SERVER_IO - " << ERR_error_string(ERR_get_error(), NULL) << " ID - " << ioData->key << endl;
-//                    return FALSE;
-//                }
-//                else
-//                {
-//                    spdlog::info("[-]SSL_get_error() SERVER_IO - {}. ID - {}", error, ioData->key);
-//                    //cout << "[+]SSL_get_error() - " << error << endl;
-//                    return FALSE;
-//                }
-//            }
-//            else
-//            {
-//                if (verbose)
-//                {
-//                    spdlog::info("[+]SSL_read() server - {} bytes. ID - {}", sslRead, ioData->key);
-//                    //cout << "[+]SSL_read() server - " << sslRead << " bytes. ID - " << ioData->key << endl;
-//                }
-//                cout << ioData->sRecvBuffer << endl;
-//                sslWrite = SSL_write(ioData->clientSSL, ioData->sRecvBuffer, sslRead);
-//                if (sslWrite > 0)
-//                {
-//                    if (verbose)
-//                    {
-//                        spdlog::info("[+]SSL_write() client - {} bytes. ID - {}", sslWrite, ioData->key);
-//                        //cout << "[+]SSL_write() client - " << sslWrite << " bytes. ID - " << ioData->key << endl;
-//                    }
-//                    memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
-//                }
-//                else
-//                {
-//                    error = SSL_get_error(ioData->clientSSL, sslWrite);
-//                    spdlog::info("[-]SSL_write() - {}. ID - {}", error, ioData->key);
-//                    //cout << "[-]SSL_write() - " << error << endl;
-//                }
-//                while ((sslRead = SSL_read(ioData->targetSSL, ioData->sRecvBuffer, BUFFER_SIZE)) > 0)
-//                {
-//                    if (verbose)
-//                    {
-//                        spdlog::info("[+]SSL_read() server - {} bytes. ID - {}", sslRead, ioData->key);
-//                        //cout << "[+]SSL_read() server - " << sslRead << " bytes. ID - " << ioData->key << endl;
-//                    }
-//                    cout << ioData->sRecvBuffer << endl;
-//                    sslWrite = SSL_write(ioData->clientSSL, ioData->sRecvBuffer, sslRead);
-//                    if (sslWrite > 0)
-//                    {
-//                        if (verbose)
-//                        {
-//                            spdlog::info("[+]SSL_write() client - {} bytes. ID - {}", sslWrite, ioData->key);
-//                            //cout << "[+]SSL_write() client - " << sslWrite << " bytes. ID - " << ioData->key << endl;
-//                        }
-//                        memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
-//                    }
-//                    else
-//                    {
-//                        error = SSL_get_error(ioData->clientSSL, sslWrite);
-//                        spdlog::info("[-]SSL_write() client - {}. ID - {}", error, ioData->key);
-//                        //cout << "[-]SSL_write() - " << error << endl;
-//                    }
-//                }
-//                error = SSL_get_error(ioData->targetSSL, sslRead);
-//                spdlog::info("[-]SSL_write() server - {}. ID - {}", error, ioData->key);
-//                //cout << "[=]SSL_get_error() - " << error << endl;
-//                ioData->bioSFlag = TRUE;
-//                ioData->serverSendFlag = TRUE;
-//                return TRUE;
-//            }
-//        }
-//        else
-//        {
-//            spdlog::info("[-]BIO_write() server failed");
-//            //cout << "[-]BIO_write() server failed" << endl;
-//            return FALSE;
-//        }
-//    }
-//    return TRUE;
-//}
-//
-//BOOL BioUtil(LPPER_IO_DATA ioData, MODE mode)
-//{
-//    int bioRead = 0, bioWrite = 0, sslRead = 0, sslWrite = 0, error;
-//    DWORD flags = 0;
-//
-//    if (mode == CLIENT)
-//    {
-//        memset(ioData->sSendBuffer, '\0', BUFFER_SIZE);
-//        bioRead = BIO_read(ioData->swBio, ioData->sSendBuffer, BUFFER_SIZE);
-//        if (bioRead > 0)
-//        {
-//            if (verbose)
-//            {
-//                spdlog::info("[+]BIO_read() server - {} bytes. ID - {}", bioRead, ioData->key);
-//                //cout << "[+]BIO_read() server - " << bioRead << " bytes. ID - " << ioData->key << endl;
-//            }
-//            ioData->serverSendFlag = TRUE;
-//            ioData->wsaServerSendBuf.len = bioRead;
-//
-//            if (WSASend(ioData->serverSocket, &ioData->wsaServerSendBuf, 1, &ioData->bytesSend, flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-//            {
-//                error = WSAGetLastError();
-//                spdlog::info("[-]WSASend() IO pending. ID - {}", ioData->key);
-//                //cout << "[-]WSASend() IO pending. ID - " << ioData->key << endl;
-//                if (error != WSA_IO_PENDING)
-//                {
-//                    spdlog::info("[-]WSASend() failed - {}. ID - {}", error, ioData->key);
-//                    //cerr << "[-]WSASend() failed - " << error << " ID - " << ioData->key << endl;
-//                    closesocket(ioData->clientSocket);
-//                    closesocket(ioData->serverSocket);
-//                    delete ioData;
-//                    return FALSE;
-//                }
-//            }
-//            else
-//            {
-//                spdlog::info("[+]WSASend() server - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-//                //cout << "[+]WSASend() server - " << ioData->bytesSend << " bytes. ID - " << ioData->key << endl;
-//            }
-//        }
-//        else if (ioData->serverRecvFlag)
-//        {
-//            ioData->bioCFlag = FALSE;
-//            return FALSE;
-//        }
-//        else
-//        {
-//            ioData->bioCFlag = FALSE;
-//            ioData->serverRecvFlag = TRUE;
-//            memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
-//
-//            if (WSARecv(ioData->serverSocket, &ioData->wsaServerRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-//            {
-//                error = WSAGetLastError();
-//                spdlog::info("[-]WSARecv() server BIO IO pending ID - {}", ioData->key);
-//                //cout << "[-]WSARecv() server BIO IO pending ID - " << ioData->key << endl;
-//                if (error != WSA_IO_PENDING)
-//                {
-//                    spdlog::info("[-]WSARecv() server BIO - {}. ID - {}", error, ioData->key);
-//                    //cerr << "[-]WSARecv() server BIO - " << error << " ID - " << ioData->key << endl;
-//                    closesocket(ioData->clientSocket);
-//                    closesocket(ioData->serverSocket);
-//                    delete ioData;
-//                    return FALSE;
-//                }
-//            }
-//            else
-//            {
-//                spdlog::info("[+]WSARecv() server BIO - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-//                //cout << "[+]WSARecv() server BIO - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
-//            }
-//
-//            return FALSE;
-//        }
-//
-//    }
-//    else if (mode == SERVER)
-//    {
-//        memset(ioData->cSendBuffer, '\0', BUFFER_SIZE);
-//        bioRead = BIO_read(ioData->cwBio, ioData->cSendBuffer, BUFFER_SIZE);
-//        if (bioRead > 0)
-//        {
-//            if (verbose)
-//            {
-//                spdlog::info("[+]BIO_read() client - {} bytes. ID - {}", bioRead, ioData->key);
-//                //cout << "[+]BIO_read() client - " << bioRead << " bytes. ID - " << ioData->key << endl;
-//            }
-//            ioData->clientSendFlag = TRUE;
-//            ioData->wsaClientSendBuf.len = bioRead;
-//
-//            if (WSASend(ioData->clientSocket, &ioData->wsaClientSendBuf, 1, &ioData->bytesSend, flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-//            {
-//                int error = WSAGetLastError();
-//                spdlog::info("[-]WSASend() client BIO IO pending. ID - ", ioData->key);
-//                //cout << "[-]WSASend() client BIO IO pending. ID - " << ioData->key << endl;
-//                if (error != WSA_IO_PENDING)
-//                {
-//                    spdlog::info("[-]WSASend() client - {}. ID - {}", error, ioData->key);
-//                    //cerr << "[-]WSASend() client - " << error << " ID - " << ioData->key << endl;
-//                    closesocket(ioData->clientSocket);
-//                    closesocket(ioData->serverSocket);
-//                    delete ioData;
-//                    return FALSE;
-//                }
-//            }
-//            else
-//            {
-//                spdlog::info("[+]WSASend() client - {}  bytes. ID - {}", ioData->bytesSend, ioData->key);
-//                //cout << "[+]WSASend() client - " << ioData->bytesSend << " bytes. ID - " << ioData->key << endl;
-//            }
-//        }
-//        else if (ioData->clientRecvFlag)
-//        {
-//            ioData->bioSFlag = FALSE;
-//            return FALSE;
-//        }
-//        else
-//        {
-//            ioData->bioSFlag = FALSE;
-//            ioData->clientRecvFlag = TRUE;
-//            memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
-//
-//            if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-//            {
-//                int error = WSAGetLastError();
-//                spdlog::info("[-]WSARecv() client BIO IO pending. ID - {}", ioData->key);
-//                //cout << "[-]WSARecv() client BIO IO pending. ID - " << ioData->key << endl;
-//                if (error != WSA_IO_PENDING)
-//                {
-//                    spdlog::info("[-]WSARecv() client BIO - {}. ID - {}", error, ioData->key);
-//                    //cerr << "[-]WSARecv() client BIO - " << error << " ID - " << ioData->key << endl;
-//                    closesocket(ioData->clientSocket);
-//                    closesocket(ioData->serverSocket);
-//                    delete ioData;
-//                    return FALSE;
-//                }
-//            }
-//            else
-//            {
-//                spdlog::info("[+]WSARecv() client BIO - {}  bytes. ID - {}", ioData->bytesRecv, ioData->key);
-//                //cout << "[+]WSARecv() client BIO - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
-//            }
-//
-//            return FALSE;
-//        }
-//
-//    }
-//
-//    return TRUE;
-//}
 
 static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 {
@@ -778,7 +388,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
         if (!result)
         {
             spdlog::info("[-]GetQueuedCompletionStatus failed - {}", GetLastError());
-            //cerr << "[-]GetQueuedCompletionStatus failed - " << GetLastError() << endl;
         }
 
         if (ioData == NULL)
@@ -791,7 +400,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
         if (!result || bytesTransferred == 0)
         {
             spdlog::info("[-]Connection closed. ID - {}", ioData->key);
-            //cerr << "[-]Connection closed. ID - " << ioData->key << endl;
             if (ioData)
             {
                 closesocket(ioData->clientSocket);
@@ -810,7 +418,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
             int port = 0;
             string request(ioData->cRecvBuffer, ioData->bytesRecv);
-            //cout << request << endl;
 
             if (strncmp(ioData->cRecvBuffer, "CONNECT", 7) == 0)
             {
@@ -820,7 +427,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 if (!parseConnectRequest(request, hostname, port))
                 {
                     spdlog::info("[-]Invalid CONNECT request");
-                    //cerr << "[-]Invalid CONNECT request" << endl;
                     closesocket(ioData->clientSocket);
                     delete ioData;
                     break;
@@ -831,14 +437,12 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     ioData->hostname = hostname;
                     ioData->serverSocket = connectToTarget(hostname, port);
                     spdlog::info("[+]Connected to server - {}, on port - {}. ID - {}", hostname, port, ioData->key);
-                    //cout << "[+]Connected to server - " << hostname << ", on port - " << port << ". ID - " << ioData->key << endl;
 
                     if (ioData->serverSocket != INVALID_SOCKET)
                     {
                         if (CreateIoCompletionPort((HANDLE)ioData->serverSocket, ProxyCompletionPort, NULL, 0) == NULL)
                         {
                             spdlog::info("[-]CreateIoCompletionPort for server failed");
-                            //cerr << "[-]CreateIoCompletionPort for server failed" << endl;
                             closesocket(ioData->serverSocket);
                             ioData->serverSocket = INVALID_SOCKET;
                             closesocket(ioData->clientSocket);
@@ -849,7 +453,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         else if (verbose)
                         {
                             spdlog::info("[+]Updated Io completion port. ID - {}", ioData->key);
-                            //cout << "[+]Updated Io completion port. ID - " << ioData->key << endl;
                         }
                     }
 
@@ -860,7 +463,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     if (!ioData->crBio || !ioData->cwBio || !ioData->srBio || !ioData->swBio)
                     {
                         spdlog::info("[-]BIO_new failed. ID - ", ioData->key);
-                        //cout << "[-]BIO_new failed" << endl;
                         break;
                     }
                     else
@@ -876,7 +478,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     ioData->targetSSL = SSL_new(targetCTX);
                     if (!SSL_set_tlsext_host_name(ioData->targetSSL, ioData->hostname.c_str())) {
                         spdlog::info("[-]SSL_set_tlsext_host_name() failed. ID - {}", ioData->key);
-                        //cout << "[-]SSL_set_tlsext_host_name() failed" << endl;
                         ERR_print_errors_fp(stderr);
                         break;
                     }
@@ -892,11 +493,9 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     {
                         int error = WSAGetLastError();
                         spdlog::info("[-]WSASend() failed. ID - {}", ioData->key);
-                        //cout << "[-]WSASend() failed" << endl;
                         if (error != WSA_IO_PENDING)
                         {
                             spdlog::info("[-]Failed to send response - {}. ID - {}", error, ioData->key);
-                            //cerr << "[-]Failed to send response - " << error << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
                             delete ioData;
@@ -906,7 +505,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     else
                     {
                         spdlog::info("[+]Connection established with client. ID - {}", ioData->key);
-                        //cout << "[+]Connection established with client. ID - " << ioData->key << endl;
                     }
                 }
             }
@@ -922,7 +520,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         if (CreateIoCompletionPort((HANDLE)ioData->serverSocket, ProxyCompletionPort, NULL, 0) == NULL)
                         {
                             spdlog::info("[-]CreateIoCompletionPort for server failed. ID - {}", ioData->key);
-                            //cerr << "[-]CreateIoCompletionPort for server failed" << endl;
                             closesocket(ioData->serverSocket);
                             closesocket(ioData->clientSocket);
                             delete ioData;
@@ -931,7 +528,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         else if (verbose)
                         {
                             spdlog::info("[+]Updated Io completion port. ID - {}", ioData->key);
-                            //cout << "[+]Updated Io completion port" << endl;
                         }
                     }
 
@@ -945,7 +541,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         if (error != WSA_IO_PENDING)
                         {
                             spdlog::info("[-]Failed to send response - {}. ID - {}", error, ioData->key);
-                            //cerr << "[-]Failed to send response - " << error << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
                             delete ioData;
@@ -955,7 +550,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     else
                     {
                         spdlog::info("[+]WSASend() server - {} bytes. ID - {}", ioData->bytesSend, ioData->key);
-                        //cout << "[+]WSASend() server - " << ioData->bytesSend << " bytes. ID - " << ioData->key << endl;
                     }
                 }
             }
@@ -971,11 +565,9 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             {
                 int error = WSAGetLastError();
                 spdlog::info("[-]WSARecv() HTTP_S_RECV - {}. ID - {}", error, ioData->key);
-                //cout << "[-]WSARecv() HTTP_S_RECV - " << error << endl;
                 if (error != WSA_IO_PENDING)
                 {
                     spdlog::info("[-]Failed to send response - {}. ID - {}", error, ioData->key);
-                    //cerr << "[-]Failed to send response - " << error << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
                     delete ioData;
@@ -985,7 +577,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             else
             {
                 spdlog::info("[+]WSARecv() HTTP_S_RECV - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-                //cout << "[+]WSARecv() HTTP_S_RECV - " << ioData->bytesRecv << " bytes." << endl;
             }
 
             break;
@@ -1005,7 +596,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 if (error != WSA_IO_PENDING)
                 {
                     spdlog::info("[-]Failed to send response - {}. ID - {}", error, ioData->key);
-                    //cerr << "[-]Failed to send response - " << error << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
                     delete ioData;
@@ -1015,8 +605,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             else
             {
                 spdlog::info("[+]WSASend() HTTP_C_SEND - {} bytes. ID - {}", ioData->bytesSend, ioData->key);
-                //cout << "[+]WSASend() HTTP_C_SEND - " << ioData->bytesSend << " bytes." << endl;
-                //cout << ioData->cSendBuffer << endl;
             }
 
             break;
@@ -1033,7 +621,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 if (error != WSA_IO_PENDING)
                 {
                     spdlog::info("[-]Failed to send response - {}. ID - {}", error, ioData->key);
-                    //cerr << "[-]Failed to send response - " << error << endl;
                     closesocket(ioData->clientSocket);
                     closesocket(ioData->serverSocket);
                     delete ioData;
@@ -1043,8 +630,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             else
             {
                 spdlog::info("[+]WSARecv() HTTP_C_RECV - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-                //cout << "[+]WSARecv() HTTP_C_RECV - " << ioData->bytesRecv << " bytes." << endl;
-                //cout << ioData->cRecvBuffer << endl;
             }
 
             break;
@@ -1054,12 +639,10 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
             if (strlen(ioData->sRecvBuffer) > 0)
             {
-                //ioData->clientRecvFlag = FALSE;
                 int bio_write = BIO_write(ioData->srBio, ioData->sRecvBuffer, bytesTransferred);
                 if (bio_write > 0)
                 {
                     spdlog::info("[+]BIO_write() server - {} bytes. ID - {}", bio_write, ioData->key);
-                    //cout << "[+]BIO_write() server - " << bio_write << " bytes. ID - " << ioData->key << endl;
                 }
                 memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
             }
@@ -1082,7 +665,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     if (!ioData->targetCert)
                     {
                         spdlog::info("[-]Cert of server not extracted. ID - {}", ioData->key);
-                        //cout << "[-]Cert of server not extracted" << endl;
                         SSL_shutdown(ioData->targetSSL);
                         SSL_free(ioData->targetSSL);
                     }
@@ -1095,7 +677,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     if (!ioData->clientCTX)
                     {
                         spdlog::info("[-]Failed to create client SSL CTX. ID - {}", ioData->key);
-                        //cerr << "[-]Failed to create client SSL CTX" << endl;
                     }
 
                     ioData->clientSSL = SSL_new(ioData->clientCTX);
@@ -1106,17 +687,13 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     {
                         int ret_client = SSL_do_handshake(ioData->clientSSL);
 
-                        //ioData->clientRecvFlag = TRUE;
-
                         if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
                         {
                             DWORD error = WSAGetLastError();
                             spdlog::info("[-]WSARecv() failed - {}. ID - {}", error, ioData->key);
-                            //cout << "[-]WSARecv() IO pending" << endl;
                             if (error != WSA_IO_PENDING)
                             {
                                 spdlog::info("[-]WSARecv() failed - {}. ID - {}", error, ioData->key);
-                                //cout << "[-]WSARecv() failed - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
                                 delete ioData;
@@ -1126,7 +703,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         else
                         {
                             spdlog::info("[+]WSARecv() client - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-                            //cout << "[+]WSARecv() client - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
                         }
 
                     }
@@ -1137,7 +713,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 status = SSL_get_error(ioData->targetSSL, ret_server);
 
                 spdlog::info("[=]SSL_get_error() - {}. ID - {}", status, ioData->key);
-                //cout << "[=]SSL_get_error() - " << status << " ID - " << ioData->key << endl;
 
                 if (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE)
                 {
@@ -1148,7 +723,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         if (verbose)
                         {
                             spdlog::info("[+]BIO_read() server - {} bytes. ID - {}", bio_read, ioData->key);
-                            //cout << "[+]BIO_read() server - " << bio_read << " bytes. ID - " << ioData->key << endl;
                         }
 
                         memcpy(ioData->wsaServerSendBuf.buf, Buf, bio_read);
@@ -1158,11 +732,9 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         {
                             int error = WSAGetLastError();
                             spdlog::info("[-]WSASend error - {}. ID - {}", error, ioData->key);
-                            //cout << "[-]WSASend error - " << error << endl;
                             if (error != WSA_IO_PENDING)
                             {
                                 spdlog::info("[-]WSASend error - {}. ID - {}", error, ioData->key);
-                                //cerr << "[-]WSASend error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
                                 delete ioData;
@@ -1172,28 +744,20 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         else
                         {
                             spdlog::info("[+]WSASend() server - {} bytes. ID - {}", ioData->bytesSend, ioData->key);
-                            //cout << "[+]WSASend() server - " << ioData->bytesSend << " bytes. ID - " << ioData->key << endl;
                         }
                     }
-                    /*else if (ioData->serverRecvFlag)
-                    {
-                        break;
-                    }*/
                     else
                     {
                         ioData->bytesRecv = 0;
-                        //ioData->serverRecvFlag = TRUE;
                         ioData->wsaServerRecvBuf.len = BUFFER_SIZE;
 
                         if (WSARecv(ioData->serverSocket, &ioData->wsaServerRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
                         {
                             int error = WSAGetLastError();
                             spdlog::info("[-]WSARecv error - {}. ID - {}", error, ioData->key);
-                            //cout << "[-]WSARecv error - " << error << endl;
                             if (error != WSA_IO_PENDING)
                             {
                                 spdlog::info("[-]WSARecv error - {}. ID - {}", error, ioData->key);
-                                //cerr << "[-]WSARecv error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
                                 delete ioData;
@@ -1203,7 +767,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         else
                         {
                             spdlog::info("[+]WSARecv() server - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-                            //cout << "[+]WSARecv() server - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
                         }
                     }
 
@@ -1211,13 +774,11 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 else if (status == SSL_ERROR_SSL)
                 {
                     spdlog::info("[-]SSL_get_error() - {}. ID - {}", ERR_error_string(ERR_get_error(), NULL), ioData->key);
-                    //cout << "[-]SSL_get_error() - " << ERR_error_string(ERR_get_error(), NULL) << endl;
                     break;
                 }
                 else
                 {
                     spdlog::info("[-]SSL_get_error() -{}. ID - {}", status, ioData->key);
-                    //cout << "[-]SSL_get_error() - " << status << endl;
                     break;
                 }
 
@@ -1225,7 +786,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             else if (verbose)
             {
                 spdlog::info("[+]SSL handshake with server done. ID - {}", ioData->key);
-                //cout << "[+]SSL handshake with server done - 2" << endl;
             }
 
             break;
@@ -1239,12 +799,10 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 int bio_write = BIO_write(ioData->crBio, ioData->cRecvBuffer, bytesTransferred);
                 if (bio_write > 0 && verbose) {
                     spdlog::info("[+]BIO_write() client - {} bytes. ID - {}", bio_write, ioData->key);
-                    //cout << "[+]BIO_write() client - " << bio_write << " bytes. ID - " << ioData->key << endl;
                 }
                 else
                 {
                     spdlog::info("[-]BIO_write() client. ID - {}", ioData->key);
-                    //cout << "[-]BIO_write() client" << endl;
                 }
                 memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
             }
@@ -1269,7 +827,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         if (WSAGetLastError() != WSA_IO_PENDING)
                         {
                             spdlog::info("[-]WSARecv() failed. ID - {}", ioData->key);
-                            //cerr << "[-]WSARecv() failed" << endl;
                             closesocket(ioData->clientSocket);
                             closesocket(ioData->serverSocket);
                             delete ioData;
@@ -1279,7 +836,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     else
                     {
                         spdlog::info("[+]WSARecv() client - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-                        //cout << "[+]WSARecv() client - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
                     }
 
                     break;
@@ -1288,7 +844,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 status = SSL_get_error(ioData->clientSSL, ret_client);
 
                 spdlog::info("[=]SSL_get_error() - {}. ID - {}", status, ioData->key);
-                //cout << "[=]SSL_get_error() - " << status << " ID - " << ioData->key << endl;
 
                 if (status == SSL_ERROR_WANT_READ || status == SSL_ERROR_WANT_WRITE)
                 {
@@ -1299,7 +854,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         if (verbose)
                         {
                             spdlog::info("[+]BIO_read() client - {} bytes. ID - {}", bio_read, ioData->key);
-                            //cout << "[+]BIO_read() client - " << bio_read << " bytes. ID - " << ioData->key << endl;
                         }
 
                         memcpy(ioData->wsaClientSendBuf.buf, Buf, bio_read);
@@ -1309,11 +863,9 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         {
                             int error = WSAGetLastError();
                             spdlog::info("[-]WSASend() error - {}. ID - {}", error, ioData->key);
-                            //cout << "[-]WSASend() error - " << error << endl;
                             if (error != WSA_IO_PENDING)
                             {
                                 spdlog::info("[-]WSASend() error - {}. ID - {}", error, ioData->key);
-                                //cerr << "[-]WSASend() error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
                                 delete ioData;
@@ -1323,7 +875,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         else
                         {
                             spdlog::info("[+]WSASend() client - {} bytes. ID - {}", ioData->bytesSend, ioData->key);
-                            //cout << "[+]WSASend() client - " << ioData->bytesSend << " bytes. ID - " << ioData->key << endl;
                         }
                     }
                     else
@@ -1337,11 +888,9 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         {
                             int error = WSAGetLastError();
                             spdlog::info("[-]WSARecv() error - {}. ID - {}", error, ioData->key);
-                            //cout << "[-]WSARecv() error - " << error << endl;
                             if (error != WSA_IO_PENDING)
                             {
                                 spdlog::info("[-]WSARecv() error - {}. ID - {}", error, ioData->key);
-                                //cerr << "[-]WSARecv() error - " << error << endl;
                                 closesocket(ioData->clientSocket);
                                 closesocket(ioData->serverSocket);
                                 delete ioData;
@@ -1351,7 +900,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         else
                         {
                             spdlog::info("[+]WSARecv() client - {} bytes. ID - {}", ioData->key);
-                            //cout << "[+]WSARecv() client - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
                         }
 
                     }
@@ -1360,13 +908,11 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 else if (status == SSL_ERROR_SSL)
                 {
                     spdlog::info("[-]SSL_get_error() - {}. ID - {}", ERR_error_string(ERR_get_error(), NULL), ioData->key);
-                    //cout << "[-]SSL_get_error() - " << ERR_error_string(ERR_get_error(), NULL) << endl;
                     break;
                 }
                 else
                 {
                     spdlog::info("[-]SSL_get_error() - {}. ID - {}", status, ioData->key);
-                    //cout << "[-]SSL_get_error() - " << status << endl;
                     break;
                 }
 
@@ -1374,102 +920,10 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             else
             {
                 spdlog::info("[+]SSL handshake with client done. ID - {}", ioData->key);
-                //cout << "[+]SSL handshake with client done - 2" << endl;
             }
 
             break;
         }
-
-        //case IO: {
-
-        //    int bioRead = 0, bioWrite = 0, sslRead = 0, sslWrite = 0;
-
-        //    if (strlen(ioData->cRecvBuffer) > 0 && !ioData->bioCFlag)
-        //    {
-        //        if (!IOUtil(ioData, CLIENT, bytesTransferred))
-        //            break;
-        //    }
-
-        //    else if (strlen(ioData->sRecvBuffer) > 0 && !ioData->bioSFlag)
-        //    {
-        //        if (!IOUtil(ioData, SERVER, bytesTransferred))
-        //            break;
-        //    }
-
-        //    if (ioData->bioCFlag)
-        //    {
-        //        if (!BioUtil(ioData, CLIENT))
-        //            break;
-        //    }
-
-        //    if (ioData->bioSFlag)
-        //    {
-        //        if (!BioUtil(ioData, SERVER))
-        //            break;
-        //    }
-
-        //    if (strlen(ioData->cRecvBuffer) == 0 && !ioData->bioCFlag && !ioData->clientRecvFlag)
-        //    {
-        //        ioData->bioCFlag = FALSE;
-        //        ioData->clientRecvFlag = TRUE;
-        //        memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
-
-        //        if (WSARecv(ioData->clientSocket, &ioData->wsaClientRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-        //        {
-        //            int error = WSAGetLastError();
-        //            spdlog::info("[-]WSARecv() client IO pending (out). ID - {}", ioData->key);
-        //            //cout << "[-]WSARecv() client IO pending (out). ID - " << ioData->key << endl;
-        //            if (error != WSA_IO_PENDING)
-        //            {
-        //                spdlog::info("[-]WSARecv() client IO (out) - {}. ID - {}", error, ioData->key);
-        //                //cerr << "[-]WSARecv() client IO (out) - " << error << " ID - " << ioData->key << endl;
-        //                closesocket(ioData->clientSocket);
-        //                closesocket(ioData->serverSocket);
-        //                delete ioData;
-        //                break;
-        //            }
-        //        }
-        //        else
-        //        {
-        //            spdlog::info("[+]WSARecv() client IO (out) - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-        //            //cout << "[+]WSARecv() client IO (out) - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
-        //        }
-
-        //        break;
-        //    }
-
-        //    if (strlen(ioData->sRecvBuffer) == 0 && !ioData->bioSFlag && !ioData->serverRecvFlag)
-        //    {
-        //        ioData->bioSFlag = FALSE;
-        //        ioData->serverRecvFlag = TRUE;
-        //        memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
-
-        //        if (WSARecv(ioData->serverSocket, &ioData->wsaServerRecvBuf, 1, &ioData->bytesRecv, &flags, &ioData->overlapped, NULL) == SOCKET_ERROR)
-        //        {
-        //            int error = WSAGetLastError();
-        //            spdlog::info("[-]WSARecv() server IO pending (out). ID - {}", ioData->key);
-        //            //cout << "[-]WSARecv() server IO pending (out). ID - " << ioData->key << endl;
-        //            if (error != WSA_IO_PENDING)
-        //            {
-        //                spdlog::info("[-]WSARecv() server IO (out) - {}. ID - {}", error, ioData->key);
-        //                //cerr << "[-]WSARecv() server IO (out) - " << error << " ID - " << ioData->key << endl;
-        //                closesocket(ioData->clientSocket);
-        //                closesocket(ioData->serverSocket);
-        //                delete ioData;
-        //                break;
-        //            }
-        //        }
-        //        else
-        //        {
-        //            spdlog::info("[+]WSARecv() server IO (out) - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
-        //            //cout << "[+]WSARecv() server IO (out) - " << ioData->bytesRecv << " bytes. ID - " << ioData->key << endl;
-        //        }
-
-        //        break;
-        //    }
-
-        //    break;
-        //}
 
         case IO: {
 
@@ -1485,7 +939,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     ioData->clientRecvFlag = FALSE;
 
                     //spdlog::info("[+]BIO_write() client - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->cRecvBuffer, bioWrite));
-                    //cout << "[+]BIO_write() client - " << bioWrite << " bytes. ID - " << ioData->key << endl << toHex(ioData->cRecvBuffer, bioWrite) << endl;
                     memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
 
                     sslRead = SSL_read(ioData->clientSSL, ioData->cRecvBuffer, BUFFER_SIZE);
@@ -1610,7 +1063,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     ioData->serverRecvFlag = FALSE;
 
                     //spdlog::info("[+]BIO_write() server - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->sRecvBuffer, bioWrite));
-                    //cout << "[+]BIO_write() server - " << bioWrite << " bytes. ID - " << ioData->key << endl << toHex(ioData->sRecvBuffer, bioWrite) << endl;
                     memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
 
                     sslRead = SSL_read(ioData->targetSSL, ioData->sRecvBuffer, BUFFER_SIZE);
@@ -1959,5 +1411,630 @@ VOID cleanupSSL(VOID)
     ERR_free_strings();
     CRYPTO_cleanup_all_ex_data();
     spdlog::info("[+]OpenSSL cleaned up.");
-    //cout << "[+]OpenSSL cleaned up" << endl;
+}
+
+void CleanupProxyServer()
+{
+    closesocket(proxySocket);    // Close the main proxy socket
+    WSACleanup();                // Clean up Winsock
+    cleanupSSL();                // Clean up OpenSSL resources
+
+    if (ProxyCompletionPort)
+    {
+        CloseHandle(ProxyCompletionPort);  // Close the completion port handle
+    }
+
+    // Additional resource cleanup if needed
+    spdlog::info("[+] Proxy server cleanup complete.");
+}
+
+
+VOID WINAPI ServiceMain(DWORD dwArgc, LPSTR* lpArgv)
+{
+    cout << "[+]ServiceMain start " << endl;
+
+    // Register Service Control Handler Function to SCM
+    BOOL bServcieStatus = FALSE;
+
+    hServiceStatusHandle = RegisterServiceCtrlHandler(
+        SERVICE_NAME,
+        ServiceControlHandler);
+
+    if (hServiceStatusHandle == NULL)
+    {
+        cout << "[-]RegisterServiceCtrlHandler failed " << GetLastError() << endl;
+        return;
+    }
+    /*else
+    {
+        cout << "[+]RegisterServiceCtrlHandler success " << endl;
+    }*/
+
+    // Set-up ServiceStatus Structure
+    ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    ServiceStatus.dwServiceSpecificExitCode = 0;
+    ServiceStatus.dwCheckPoint = 0;
+    ServiceStatus.dwWaitHint = 0;
+
+    // Call Report Status function for Initial Set-up
+    ServiceReportStatus(SERVICE_START_PENDING, NO_ERROR, 3000);
+
+    bServcieStatus = SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+
+    if (bServcieStatus == FALSE)
+    {
+        cout << "[-]Initial Set-up failed " << GetLastError() << endl;
+    }
+    else
+    {
+        cout << "[+]Initial Set-up done" << endl;
+    }
+
+    // call ServiceInit function
+    ServiceInit(dwArgc, lpArgv);
+
+    cout << "ServiceMain end" << endl;
+}
+
+VOID ServiceControlHandler(DWORD dwControl)
+{
+    cout << "ServiceControlHandler" << endl;
+
+    switch (dwControl)
+    {
+    case SERVICE_CONTROL_STOP:
+    {
+        ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+        SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+
+        // Trigger your server's cleanup logic
+        CleanupProxyServer();
+
+        ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+        SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+        break;
+    }
+
+    case SERVICE_CONTROL_SHUTDOWN:
+    {
+        ServiceStatus.dwCurrentState = SERVICE_STOP_PENDING;
+        SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+
+        // Trigger the cleanup logic on shutdown
+        CleanupProxyServer();
+
+        ServiceStatus.dwCurrentState = SERVICE_STOPPED;
+        SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+        break;
+    }
+
+    default:
+        break;
+    }
+}
+
+VOID ServiceInit(DWORD dwArgc, LPSTR* lpArgv)
+{
+    hServiceEvent = CreateEvent(
+        NULL,	// default security attributes
+        TRUE,	// manual reset event
+        FALSE,	// not signalled
+        NULL	// no name
+    );
+
+    if (NULL == hServiceEvent)
+    {
+        ServiceReportStatus(SERVICE_STOPPED, NO_ERROR, 0);
+        return;
+    }
+
+    ServiceReportStatus(SERVICE_RUNNING, NO_ERROR, 0);
+
+    StartProxyServer();
+
+    while (1)
+    {
+        WaitForSingleObject(hServiceEvent, INFINITE);
+
+        CleanupProxyServer();
+
+        ServiceReportStatus(SERVICE_STOPPED, NO_ERROR, 0);
+        return;
+    }
+}
+
+VOID ServiceReportStatus(
+    DWORD dwCurrentState,
+    DWORD dwWin32ExitCode,
+    DWORD dwWaitHint)
+{
+    cout << "ServiceReportStatus starts" << endl;
+
+    static DWORD dwcheckPoint = 1;
+    BOOL bSetServiceStatus = FALSE;
+
+    // fill the SERVICE_STATUS struct
+    ServiceStatus.dwCurrentState = dwCurrentState;
+    ServiceStatus.dwWin32ExitCode = dwWin32ExitCode;
+    ServiceStatus.dwWaitHint = dwWaitHint;
+
+    // check the current state of service
+    if (dwCurrentState == SERVICE_START_PENDING)
+    {
+        ServiceStatus.dwControlsAccepted = 0;
+    }
+    else
+    {
+        ServiceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+    }
+
+    if ((dwCurrentState == SERVICE_RUNNING) || (dwCurrentState == SERVICE_STOPPED))
+    {
+        ServiceStatus.dwCheckPoint = 0;
+    }
+    else
+    {
+        ServiceStatus.dwCheckPoint = dwcheckPoint++;
+    }
+
+    bSetServiceStatus = SetServiceStatus(hServiceStatusHandle, &ServiceStatus);
+    if (FALSE == bSetServiceStatus)
+    {
+        cout << "SetServiceStatus failed " << GetLastError() << endl;
+    }
+    else
+    {
+        cout << "SetServiceStatus success" << endl;
+    }
+}
+
+VOID ServiceInstall()
+{
+    SC_HANDLE	hScOpenSCManager = NULL;
+    SC_HANDLE	hScCreateService = NULL;
+    DWORD		dwGetModuleFileName = 0;
+    TCHAR		szPath[MAX_PATH];
+
+    // get module file name from SCM
+    dwGetModuleFileName = GetModuleFileName(NULL, szPath, MAX_PATH);
+    if (0 == dwGetModuleFileName)
+    {
+        cout << "GetModuleFileName failed " << GetLastError() << endl;
+        return;
+    }
+    else
+    {
+        cout << "GetModuleFileName success" << endl;
+    }
+
+    // open Service Control Manager and get a handle to the SCM database
+    hScOpenSCManager = OpenSCManager(
+        NULL,						// machine name - LOCAL MACHINE
+        NULL,						// By default database - SERVICES_ACTIVE_DATABASE
+        SC_MANAGER_ALL_ACCESS);	// access right
+    if (NULL == hScOpenSCManager)
+    {
+        cout << "OpenSCManager failed " << GetLastError() << endl;
+        return;
+    }
+
+    // create a Service
+    hScCreateService = CreateService(
+        hScOpenSCManager,
+        SERVICE_NAME,
+        SERVICE_NAME,
+        SERVICE_ALL_ACCESS,
+        SERVICE_WIN32_OWN_PROCESS,
+        SERVICE_DEMAND_START,
+        SERVICE_ERROR_NORMAL,
+        szPath,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        NULL);
+    if (NULL == hScCreateService)
+    {
+        cout << "CreateService failed " << GetLastError() << endl;
+        return;
+    }
+    else
+    {
+        cout << "Service installed successfully" << endl;
+    }
+
+    // close the handles for Service manager and create service
+    CloseServiceHandle(hScCreateService);
+    CloseServiceHandle(hScOpenSCManager);
+}
+VOID ServiceDelete()
+{
+    SC_HANDLE	hScOpenSCManager = NULL;
+    SC_HANDLE	hScOpenService = NULL;
+    BOOL		bDeleteService = FALSE;
+
+    hScOpenSCManager = OpenSCManager(
+        NULL,					// local computer
+        NULL,					// ServiceActive Database
+        SC_MANAGER_ALL_ACCESS); // full access rights
+    if (NULL == hScOpenSCManager)
+    {
+        cout << "OpenSCManager failed " << GetLastError() << endl;
+        return;
+    }
+    else
+    {
+        cout << "OpenSCManager success" << endl;
+    }
+
+    hScOpenService = OpenService(
+        hScOpenSCManager,		// SCM database
+        SERVICE_NAME,			// name of the service
+        SERVICE_ALL_ACCESS);	// need delete access
+    if (NULL == hScOpenService)
+    {
+        cout << "OpenService failed " << GetLastError() << endl;
+        return;
+    }
+    else
+    {
+        cout << "OpenService success" << endl;
+    }
+
+    bDeleteService = DeleteService(hScOpenService);
+    if (FALSE == bDeleteService)
+    {
+        cout << "DeleteService failed " << GetLastError() << endl;
+        return;
+    }
+    else
+    {
+        cout << "DeleteService success" << endl;
+    }
+
+    CloseServiceHandle(hScOpenService);
+    CloseServiceHandle(hScOpenSCManager);
+}
+
+VOID ServiceStart()
+{
+    BOOL		bStartService = TRUE;
+    SERVICE_STATUS_PROCESS	SvcStatusProcess;
+    SC_HANDLE	hOpenSCManager = NULL;
+    SC_HANDLE	hOpenService = NULL;
+    BOOL		bQueryServiceStatus = TRUE;
+    DWORD		dwBytesNeeded;
+    DWORD		dwWaitTime;
+    DWORD		dwOldCheckPoint;
+    DWORD		dwStartTickCount;
+
+    hOpenSCManager = OpenSCManager(
+        NULL,
+        NULL,
+        SC_MANAGER_ALL_ACCESS);
+    if (NULL == hOpenSCManager)
+    {
+        cout << "OpenSCManager failed " << GetLastError() << endl;
+        return;
+    }
+    /*else
+    {
+        cout << "OpenSCManager success" << endl;
+    }*/
+
+    hOpenService = OpenService(
+        hOpenSCManager,			// SCM database
+        SERVICE_NAME,			// name of the service
+        SERVICE_ALL_ACCESS);	// need delete access
+    if (NULL == hOpenService)
+    {
+        cout << "OpenService failed " << GetLastError() << endl;
+        return;
+    }
+    /*else
+    {
+        cout << "OpenService success" << endl;
+    }*/
+
+    // query about current service status
+    bQueryServiceStatus = QueryServiceStatusEx(
+        hOpenService,					// service handle
+        SC_STATUS_PROCESS_INFO,			// info level
+        (LPBYTE)&SvcStatusProcess,		// buffer
+        sizeof(SERVICE_STATUS_PROCESS), // buffer size
+        &dwBytesNeeded);				// bytes needed
+    if (FALSE == bQueryServiceStatus)
+    {
+        cout << "QueryServiceStatusEx failed " << GetLastError() << endl;
+        return;
+    }
+    /*else
+    {
+        cout << "QueryServiceStatusEx success" << endl;
+    }*/
+
+    // check if process is running or stopped
+    if ((SvcStatusProcess.dwCurrentState == SERVICE_STOPPED) ||
+        (SvcStatusProcess.dwCurrentState == SERVICE_STOP_PENDING))
+    {
+        cout << "Service is already stoped" << endl;
+    }
+    /*else
+    {
+        cout << "Service is already running" << endl;
+    }*/
+
+    dwStartTickCount = GetTickCount();
+    dwOldCheckPoint = SvcStatusProcess.dwCheckPoint;
+
+    // if service is already stopped then query the service
+    while (SvcStatusProcess.dwCurrentState == SERVICE_STOP_PENDING)
+    {
+
+        dwWaitTime = SvcStatusProcess.dwWaitHint / 10;
+
+        if (dwWaitTime < 1000)
+            dwWaitTime = 1000;
+        else if (dwWaitTime > 10000)
+            dwWaitTime = 10000;
+
+        Sleep(dwWaitTime);
+
+        bQueryServiceStatus = QueryServiceStatusEx(
+            hOpenService,
+            SC_STATUS_PROCESS_INFO,
+            (LPBYTE)&SvcStatusProcess,
+            sizeof(SERVICE_STATUS_PROCESS),
+            &dwBytesNeeded);
+        if (FALSE == bQueryServiceStatus)
+        {
+            cout << "QueryServiceStatusEx failed " << GetLastError() << endl;
+            CloseServiceHandle(hOpenService);
+            CloseServiceHandle(hOpenSCManager);
+        }
+        if (SvcStatusProcess.dwCheckPoint > dwOldCheckPoint)
+        {
+            dwStartTickCount = GetTickCount();
+            dwOldCheckPoint = SvcStatusProcess.dwCheckPoint;
+        }
+        else
+        {
+            if (GetTickCount() - dwStartTickCount > SvcStatusProcess.dwWaitHint)
+            {
+                printf("Timeout waiting for service to stop\n");
+                CloseServiceHandle(hOpenService);
+                CloseServiceHandle(hOpenSCManager);
+                return;
+            }
+        }
+    }
+
+    // start the service
+    bStartService = StartService(
+        hOpenService,
+        NULL,
+        NULL);
+    if (FALSE == bStartService)
+    {
+        cout << "StartService failed " << GetLastError() << endl;
+        CloseServiceHandle(hOpenService);
+        CloseServiceHandle(hOpenSCManager);
+    }
+    else
+    {
+        cout << "StartService success" << endl;
+    }
+
+    bQueryServiceStatus = QueryServiceStatusEx(
+        hOpenService,
+        SC_STATUS_PROCESS_INFO,
+        (LPBYTE)&SvcStatusProcess,
+        sizeof(SERVICE_STATUS_PROCESS),
+        &dwBytesNeeded);
+    if (FALSE == bQueryServiceStatus)
+    {
+        cout << "QueryServiceStatusEx failed " << GetLastError() << endl;
+        CloseServiceHandle(hOpenService);
+        CloseServiceHandle(hOpenSCManager);
+    }
+    /*else
+    {
+        cout << "QueryServiceStatusEx success" << endl;
+    }*/
+
+    dwStartTickCount = GetTickCount();
+    dwOldCheckPoint = SvcStatusProcess.dwCheckPoint;
+
+    while (SvcStatusProcess.dwCurrentState == SERVICE_START_PENDING)
+    {
+        dwWaitTime = SvcStatusProcess.dwWaitHint / 10;
+
+        if (dwWaitTime < 1000)
+            dwWaitTime = 1000;
+        else if (dwWaitTime > 10000)
+            dwWaitTime = 10000;
+
+        Sleep(dwWaitTime);
+
+        bQueryServiceStatus = QueryServiceStatusEx(
+            hOpenService,
+            SC_STATUS_PROCESS_INFO,
+            (LPBYTE)&SvcStatusProcess,
+            sizeof(SERVICE_STATUS_PROCESS),
+            &dwBytesNeeded);
+        if (FALSE == bQueryServiceStatus)
+        {
+            cout << "QueryServiceStatusEx failed " << GetLastError() << endl;
+            CloseServiceHandle(hOpenService);
+            CloseServiceHandle(hOpenSCManager);
+            break;
+        }
+        if (SvcStatusProcess.dwCheckPoint > dwOldCheckPoint)
+        {
+            dwStartTickCount = GetTickCount();
+            dwOldCheckPoint = SvcStatusProcess.dwCheckPoint;
+        }
+        else
+        {
+            if (GetTickCount() - dwStartTickCount > SvcStatusProcess.dwWaitHint)
+            {
+                break;
+            }
+        }
+    }
+
+    if (SvcStatusProcess.dwCurrentState == SERVICE_RUNNING)
+    {
+        cout << "Service running..." << endl;
+    }
+    else
+    {
+        cout << "Service running failed " << GetLastError() << endl;
+    }
+
+    CloseServiceHandle(hOpenService);
+    CloseServiceHandle(hOpenSCManager);
+}
+
+VOID ServiceStop()
+{
+    SERVICE_STATUS_PROCESS	SvcStatusProcess;
+    SC_HANDLE	hScOpenSCManager = NULL;
+    SC_HANDLE	hScOpenService = NULL;
+    BOOL		bQueryServiceStatus = TRUE;
+    BOOL		bControlService = TRUE;
+    DWORD		dwBytesNeeded;
+    DWORD		dwWaitTime;
+    DWORD		dwTimeout = 30000;
+    DWORD		dwStartTime = GetTickCount();
+
+    hScOpenSCManager = OpenSCManager(
+        NULL,
+        NULL,
+        SC_MANAGER_ALL_ACCESS);
+    if (NULL == hScOpenSCManager)
+    {
+        cout << "OpenSCManager failed " << GetLastError() << endl;
+        return;
+    }
+    /*else
+    {
+        cout << "OpenSCManager success" << endl;
+    }*/
+
+    hScOpenService = OpenService(
+        hScOpenSCManager,
+        SERVICE_NAME,
+        SERVICE_ALL_ACCESS);
+    if (NULL == hScOpenService)
+    {
+        cout << "OpenService failed " << GetLastError() << endl;
+    }
+    /*else
+    {
+        cout << "OpenService success" << endl;
+    }*/
+
+    bQueryServiceStatus = QueryServiceStatusEx(
+        hScOpenService,					// service handle
+        SC_STATUS_PROCESS_INFO,			// info level
+        (LPBYTE)&SvcStatusProcess,		// buffer
+        sizeof(SERVICE_STATUS_PROCESS), // buffer size
+        &dwBytesNeeded);				// bytes needed
+    if (FALSE == bQueryServiceStatus)
+    {
+        cout << "QueryServiceStatusEx failed " << GetLastError() << endl;
+    }
+    /*else
+    {
+        cout << "QueryServiceStatusEx success" << endl;
+    }*/
+
+    if (SvcStatusProcess.dwCurrentState == SERVICE_STOPPED)
+    {
+        cout << "Service already stopped" << endl;
+        goto stopCleanup;
+    }
+
+    while (SvcStatusProcess.dwCurrentState == SERVICE_STOP_PENDING)
+    {
+        dwWaitTime = SvcStatusProcess.dwWaitHint / 10;
+
+        if (dwWaitTime < 1000)
+            dwWaitTime = 1000;
+        else if (dwWaitTime > 10000)
+            dwWaitTime = 10000;
+
+        Sleep(dwWaitTime);
+
+        bQueryServiceStatus = QueryServiceStatusEx(
+            hScOpenService,
+            SC_STATUS_PROCESS_INFO,
+            (LPBYTE)&SvcStatusProcess,
+            sizeof(SERVICE_STATUS_PROCESS),
+            &dwBytesNeeded);
+        if (TRUE == bQueryServiceStatus)
+        {
+            cout << "QueryService failed " << GetLastError() << endl;
+            goto stopCleanup;
+        }
+
+        if (SvcStatusProcess.dwCurrentState == SERVICE_STOPPED)
+        {
+            cout << "Service stopped succesfully" << endl;
+            goto stopCleanup;
+        }
+
+        if (GetTickCount() - dwStartTime > dwTimeout) {
+            cout << "Service stop timed out" << endl;
+            goto stopCleanup;
+        }
+    }
+
+    // stop dependent services
+
+    // send a stop code to the SCM
+    bControlService = ControlService(
+        hScOpenService,
+        SERVICE_CONTROL_STOP,
+        (LPSERVICE_STATUS)&SvcStatusProcess);
+    if (TRUE == bControlService)
+    {
+        cout << "Service stop success" << endl;
+    }
+    else
+    {
+        cout << "ControlService failed " << GetLastError() << endl;
+        goto stopCleanup;
+    }
+
+    while (SvcStatusProcess.dwCurrentState != SERVICE_STOPPED)
+    {
+        bQueryServiceStatus = QueryServiceStatusEx(
+            hScOpenService,
+            SC_STATUS_PROCESS_INFO,
+            (LPBYTE)&SvcStatusProcess,
+            sizeof(SERVICE_STATUS_PROCESS),
+            &dwBytesNeeded);
+        if (FALSE == bQueryServiceStatus)
+        {
+            cout << "QueryService failed " << GetLastError() << endl;
+            goto stopCleanup;
+        }
+
+        if (SvcStatusProcess.dwCurrentState == SERVICE_STOPPED)
+        {
+            cout << "Service stopped successfully" << endl;
+            break;
+        }
+        else
+        {
+            cout << "Service stop failed " << GetLastError() << endl;
+            goto stopCleanup;
+        }
+    }
+
+stopCleanup:
+    CloseServiceHandle(hScOpenService);
+    CloseServiceHandle(hScOpenSCManager);
 }
