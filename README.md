@@ -5,5 +5,8 @@
 This proxy server is made from scratch using IO completion ports and OpenSSL library. I tried to explore low-level architecture of proxy servers.
 The image above illustrates the idea behind my project in simple flowchart form. 
 
+> [!NOTE]
+> This is primarily made to run as a windows service. Refer older commits to access the code that run as a console program.
+
 > [!TIP]
 > Check out [Medium post](https://medium.com/follower-booster-hub/diy-proxy-server-using-socket-programming-in-less-than-an-hour-dfa007cacd83) for more information.
