@@ -44,6 +44,7 @@ void initializeOpenSSL()
     cout << "[+]OpenSSL initialized" << endl;
 }
 
+// function to convert data into wireshark data form for comparision [for debugging purposes]
 string toHex(const char* data, size_t length)
 {
     ostringstream oss;
@@ -70,6 +71,7 @@ string toHex(const char* data, size_t length)
     return oss.str();
 }
 
+// need to add this key_log file to Wireshark inorder to get the decrypted data [for debugging purposes]
 void SSL_CTX_keylog_callback_func(const SSL* ssl, const char* line)
 {
     FILE* fp;
@@ -86,6 +88,7 @@ void SSL_CTX_keylog_callback_func(const SSL* ssl, const char* line)
     }
 }
 
+// callback that can be triggered during the SSL handshake [set various states for better logs]
 void myInfoCallback(const SSL* ssl, int type, int ret) {
     switch (type) {
     case SSL_CB_HANDSHAKE_START:

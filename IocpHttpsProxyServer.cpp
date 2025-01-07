@@ -32,6 +32,8 @@
 #include "spdlog/spdlog.h"
 #include "spdlog/sinks/basic_file_sink.h"
 
+// to set the default logger file
+// *create an empty text file and add the path in basic_logger_mt() function*
 void replace_default_logger_example()
 {
     auto new_logger = spdlog::basic_logger_mt("new_default_logger", "C:\\Users\\user\\OneDrive\\Desktop\\output_logs.txt", true);
@@ -44,16 +46,16 @@ using namespace std;
 #pragma warning(disable : 4996)
 
 #define SERVICE_NAME TEXT("Example Service")
-SERVICE_STATUS			ServiceStatus = { 0 };
-SERVICE_STATUS_HANDLE	hServiceStatusHandle = NULL;
-HANDLE					hServiceEvent = NULL;
+SERVICE_STATUS ServiceStatus = {0};
+SERVICE_STATUS_HANDLE hServiceStatusHandle = NULL;
+HANDLE hServiceEvent = NULL;
 
 #define BUFFER_SIZE 4096
-#define PORT        8080
+#define PORT 8080
 
 HANDLE ProxyCompletionPort;
-X509* caCert;
-EVP_PKEY* caKey;
+X509 *caCert;
+EVP_PKEY *caKey;
 SOCKET proxySocket;
 
 BOOL verbose = TRUE;
@@ -71,7 +73,8 @@ typedef enum _IO_OPERATION
     IO,
     SSL_SERVER_IO,
     SSL_CLIENT_IO,
-} IO_OPERATION, * PERIO_OPERATIONS;
+} IO_OPERATION,
+    *PERIO_OPERATIONS;
 
 enum MODE
 {
@@ -79,6 +82,7 @@ enum MODE
     SERVER,
 };
 
+// struct to store IOCP data
 typedef struct _PER_IO_DATA
 {
     WSAOVERLAPPED overlapped;
@@ -88,35 +92,35 @@ typedef struct _PER_IO_DATA
     char cSendBuffer[BUFFER_SIZE], cRecvBuffer[BUFFER_SIZE], sSendBuffer[BUFFER_SIZE], sRecvBuffer[BUFFER_SIZE];
     DWORD bytesSend, bytesRecv;
     IO_OPERATION ioOperation;
-    SSL* clientSSL, * targetSSL;
-    X509* clientCert, * targetCert;
-    SSL_CTX* clientCTX;
+    SSL *clientSSL, *targetSSL;
+    X509 *clientCert, *targetCert;
+    SSL_CTX *clientCTX;
     string hostname;
-    EVP_PKEY* pkey;
-    BIO* srBio, * swBio, * crBio, * cwBio;
+    EVP_PKEY *pkey;
+    BIO *srBio, *swBio, *crBio, *cwBio;
     BOOL bioCFlag = FALSE, bioSFlag = FALSE;
     BOOL clientRecvFlag = FALSE, serverRecvFlag = FALSE;
     BOOL clientSendFlag = FALSE, serverSendFlag = FALSE;
-} PER_IO_DATA, * LPPER_IO_DATA;
+} PER_IO_DATA, *LPPER_IO_DATA;
 
 LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERATION ioOperation);
 static DWORD WINAPI WorkerThread(LPVOID lparameter);
 VOID StartProxyServer(VOID);
 VOID cleanupSSL(VOID);
 
-VOID WINAPI ServiceMain(DWORD dwArgc, LPSTR* lpArgv);	// service main function
-VOID WINAPI ServiceControlHandler(DWORD dwControl);		// service control handler
+VOID WINAPI ServiceMain(DWORD dwArgc, LPSTR *lpArgv); // service main function
+VOID WINAPI ServiceControlHandler(DWORD dwControl);   // service control handler
 VOID ServiceReportStatus(
     DWORD dwCurrentState,
     DWORD dwWin32ExitCode,
     DWORD dwWaitHint);
-VOID ServiceInit(DWORD dwArgc, LPSTR* lpArgv);
+VOID ServiceInit(DWORD dwArgc, LPSTR *lpArgv);
 VOID ServiceInstall(VOID);
 VOID ServiceDelete(VOID);
 VOID ServiceStart(VOID);
 VOID ServiceStop(VOID);
 
-int main(int argc, CHAR* argv[])
+int main(int argc, CHAR *argv[])
 {
     BOOL bStServiceCtrlDispatcher = FALSE;
 
@@ -143,10 +147,9 @@ int main(int argc, CHAR* argv[])
     else
     {
         SERVICE_TABLE_ENTRY DispatchTable[] =
-        {
-            { (LPWSTR)SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain },
-            { NULL, NULL }
-        };
+            {
+                {(LPWSTR)SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain},
+                {NULL, NULL}};
 
         bStServiceCtrlDispatcher = StartServiceCtrlDispatcher(DispatchTable);
         if (FALSE == bStServiceCtrlDispatcher)
@@ -163,13 +166,15 @@ int main(int argc, CHAR* argv[])
     return 0;
 }
 
+// main logic starts here -->
 VOID StartProxyServer()
 {
     initializeWinsock();
     initializeOpenSSL();
     replace_default_logger_example();
 
-    FILE* ca_cert_file = fopen("C:\\Users\\user\\OneDrive\\Desktop\\Certs\\rootCA.crt", "r");
+    // we need to create a rootCA certificate and install it in our local device. refer https://superuser.com/questions/126121/how-to-create-my-own-certificate-chain.
+    FILE *ca_cert_file = fopen("C:\\Users\\user\\OneDrive\\Desktop\\Certs\\rootCA.crt", "r");
     if (!ca_cert_file)
     {
         spdlog::info("[-]Error opening CA certificate file");
@@ -184,7 +189,8 @@ VOID StartProxyServer()
         exit(EXIT_FAILURE);
     }
 
-    FILE* ca_pkey_file = fopen("C:\\Users\\user\\OneDrive\\Desktop\\Certs\\rootCA.key", "r");
+    // private key for CA
+    FILE *ca_pkey_file = fopen("C:\\Users\\user\\OneDrive\\Desktop\\Certs\\rootCA.key", "r");
     if (!ca_pkey_file)
     {
         spdlog::info("[-]Error opening CA certificate file");
@@ -239,10 +245,12 @@ VOID StartProxyServer()
         struct sockaddr_in peer_addr;
         socklen_t peer_addr_len = sizeof(peer_addr);
 
-        if (getpeername(clientSocket, (struct sockaddr*)&peer_addr, &peer_addr_len) == -1) {
+        if (getpeername(clientSocket, (struct sockaddr *)&peer_addr, &peer_addr_len) == -1)
+        {
             spdlog::info("[-]getpeername failed");
         }
-        else {
+        else
+        {
             char peer_ip[INET_ADDRSTRLEN];
             inet_ntop(AF_INET, &peer_addr.sin_addr, peer_ip, INET_ADDRSTRLEN);
 
@@ -280,7 +288,6 @@ VOID StartProxyServer()
             cout << clientData->cRecvBuffer << endl;
             clientData->bytesRecv = 0;
         }
-
     }
 
     closesocket(proxySocket);
@@ -290,6 +297,7 @@ VOID StartProxyServer()
     return;
 }
 
+// initialize the IOCP struct with server and client sockets
 LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERATION ioOperation)
 {
     LPPER_IO_DATA ioData = new PER_IO_DATA;
@@ -336,9 +344,10 @@ LPPER_IO_DATA UpdateIoCompletionPort(SOCKET socket, SOCKET peerSocket, IO_OPERAT
     return ioData;
 }
 
-int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
+// adding SNI functionality to retrieve the host name from client hello
+int ServerNameCallback(SSL *ssl, int *ad, LPPER_IO_DATA ioData)
 {
-    const char* servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+    const char *servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
     if (servername)
     {
         if (verbose)
@@ -349,7 +358,7 @@ int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
 
         // Generate key for new certificate
         ioData->pkey = EVP_PKEY_new();
-        RSA* rsa = RSA_generate_key(2048, RSA_F4, NULL, NULL);
+        RSA *rsa = RSA_generate_key(2048, RSA_F4, NULL, NULL);
         EVP_PKEY_assign_RSA(ioData->pkey, rsa);
 
         // Generate new certificate
@@ -358,7 +367,6 @@ int ServerNameCallback(SSL* ssl, int* ad, LPPER_IO_DATA ioData)
         // Assign new certificate and private key to SSL context
         SSL_use_certificate(ssl, ioData->clientCert);
         SSL_use_PrivateKey(ssl, ioData->pkey);
-
     }
     else
     {
@@ -377,12 +385,12 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
     while (TRUE)
     {
-        BOOL result = GetQueuedCompletionStatus(completionPort, 
-                                                &bytesTransferred, 
-                                                (PDWORD_PTR)&socketData, 
-                                                (LPOVERLAPPED*)&overlapped, 
+        BOOL result = GetQueuedCompletionStatus(completionPort,
+                                                &bytesTransferred,
+                                                (PDWORD_PTR)&socketData,
+                                                (LPOVERLAPPED *)&overlapped,
                                                 INFINITE);
-        
+
         LPPER_IO_DATA ioData = (LPPER_IO_DATA)overlapped;
 
         if (!result)
@@ -411,8 +419,14 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
         switch (ioData->ioOperation)
         {
+            /*
+            Client accept ->
+            for HTTP connections -  simple send-recv cycles.
+            for HTTPS connections - parse request and create new SSL object for connections
+            */
 
-        case CLIENT_ACCEPT: {
+        case CLIENT_ACCEPT:
+        {
 
             ioData->bytesRecv = bytesTransferred;
 
@@ -456,6 +470,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         }
                     }
 
+                    // using BIO memory buffers to transfer data between sockets
                     ioData->crBio = BIO_new(BIO_s_mem());
                     ioData->cwBio = BIO_new(BIO_s_mem());
                     ioData->srBio = BIO_new(BIO_s_mem());
@@ -474,16 +489,17 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         BIO_set_nbio(ioData->swBio, 1);
                     }
 
-                    SSL_CTX* targetCTX = SSL_CTX_new(TLS_client_method());
+                    SSL_CTX *targetCTX = SSL_CTX_new(TLS_client_method());
                     ioData->targetSSL = SSL_new(targetCTX);
-                    if (!SSL_set_tlsext_host_name(ioData->targetSSL, ioData->hostname.c_str())) {
+                    if (!SSL_set_tlsext_host_name(ioData->targetSSL, ioData->hostname.c_str()))
+                    {
                         spdlog::info("[-]SSL_set_tlsext_host_name() failed. ID - {}", ioData->key);
                         ERR_print_errors_fp(stderr);
                         break;
                     }
                     // to act as CLIENT
-                    SSL_set_connect_state(ioData->targetSSL); 
-                    SSL_CTX_set_verify(targetCTX, SSL_VERIFY_NONE, NULL);
+                    SSL_set_connect_state(ioData->targetSSL);
+                    SSL_CTX_set_verify(targetCTX, SSL_VERIFY_NONE, NULL); // no verifications required
                     SSL_set_bio(ioData->targetSSL, ioData->srBio, ioData->swBio);
 
                     char response[] = "HTTP/1.1 200 Connection Established\r\n\r\n";
@@ -557,7 +573,8 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             break;
         }
 
-        case HTTP_S_RECV: {
+        case HTTP_S_RECV:
+        {
 
             ioData->ioOperation = HTTP_C_SEND;
 
@@ -582,7 +599,8 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             break;
         }
 
-        case HTTP_C_SEND: {
+        case HTTP_C_SEND:
+        {
 
             ioData->ioOperation = CLIENT_ACCEPT;
 
@@ -610,7 +628,8 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             break;
         }
 
-        case HTTP_C_RECV: {
+        case HTTP_C_RECV:
+        {
 
             ioData->ioOperation = CLIENT_ACCEPT;
 
@@ -635,7 +654,8 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             break;
         }
 
-        case SSL_SERVER_IO: {
+        case SSL_SERVER_IO:
+        {
 
             if (strlen(ioData->sRecvBuffer) > 0)
             {
@@ -647,7 +667,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
             }
 
-            // SSL handshake with server 
+            // SSL handshake with server
             if (!SSL_is_init_finished(ioData->targetSSL))
             {
                 char Buf[BUFFER_SIZE] = {};
@@ -680,7 +700,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     }
 
                     ioData->clientSSL = SSL_new(ioData->clientCTX);
-                    SSL_set_accept_state(ioData->clientSSL); // to act as SERVER 
+                    SSL_set_accept_state(ioData->clientSSL); // to act as SERVER
                     SSL_set_bio(ioData->clientSSL, ioData->crBio, ioData->cwBio);
 
                     if (!SSL_is_init_finished(ioData->clientSSL))
@@ -704,7 +724,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         {
                             spdlog::info("[+]WSARecv() client - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
                         }
-
                     }
 
                     break;
@@ -769,7 +788,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                             spdlog::info("[+]WSARecv() server - {} bytes. ID - {}", ioData->bytesRecv, ioData->key);
                         }
                     }
-
                 }
                 else if (status == SSL_ERROR_SSL)
                 {
@@ -781,7 +799,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     spdlog::info("[-]SSL_get_error() -{}. ID - {}", status, ioData->key);
                     break;
                 }
-
             }
             else if (verbose)
             {
@@ -791,13 +808,15 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             break;
         }
 
-        case SSL_CLIENT_IO: {
+        case SSL_CLIENT_IO:
+        {
 
             if (strlen(ioData->cRecvBuffer) > 0)
             {
-                //ioData->clientRecvFlag = FALSE;
+                // ioData->clientRecvFlag = FALSE;
                 int bio_write = BIO_write(ioData->crBio, ioData->cRecvBuffer, bytesTransferred);
-                if (bio_write > 0 && verbose) {
+                if (bio_write > 0 && verbose)
+                {
                     spdlog::info("[+]BIO_write() client - {} bytes. ID - {}", bio_write, ioData->key);
                 }
                 else
@@ -815,7 +834,8 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
                 ret_client = SSL_do_handshake(ioData->clientSSL);
 
-                if (ret_client == 1) {
+                if (ret_client == 1)
+                {
 
                     ioData->ioOperation = IO;
                     ioData->clientRecvFlag = TRUE;
@@ -901,9 +921,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                         {
                             spdlog::info("[+]WSARecv() client - {} bytes. ID - {}", ioData->key);
                         }
-
                     }
-
                 }
                 else if (status == SSL_ERROR_SSL)
                 {
@@ -915,7 +933,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                     spdlog::info("[-]SSL_get_error() - {}. ID - {}", status, ioData->key);
                     break;
                 }
-
             }
             else
             {
@@ -925,7 +942,8 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
             break;
         }
 
-        case IO: {
+        case IO:
+        {
 
             int bioRead = 0, bioWrite = 0, sslRead = 0, sslWrite = 0, ret, error;
 
@@ -938,7 +956,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 {
                     ioData->clientRecvFlag = FALSE;
 
-                    //spdlog::info("[+]BIO_write() client - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->cRecvBuffer, bioWrite));
+                    // spdlog::info("[+]BIO_write() client - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->cRecvBuffer, bioWrite));
                     memset(ioData->cRecvBuffer, '\0', BUFFER_SIZE);
 
                     sslRead = SSL_read(ioData->clientSSL, ioData->cRecvBuffer, BUFFER_SIZE);
@@ -1062,7 +1080,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                 {
                     ioData->serverRecvFlag = FALSE;
 
-                    //spdlog::info("[+]BIO_write() server - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->sRecvBuffer, bioWrite));
+                    // spdlog::info("[+]BIO_write() server - {} bytes. ID - {}\n{}", bioWrite, ioData->key, toHex(ioData->sRecvBuffer, bioWrite));
                     memset(ioData->sRecvBuffer, '\0', BUFFER_SIZE);
 
                     sslRead = SSL_read(ioData->targetSSL, ioData->sRecvBuffer, BUFFER_SIZE);
@@ -1169,7 +1187,6 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
                             }
                         }
                         ioData->bioSFlag = TRUE;
-                        
                     }
                 }
                 else
@@ -1395,9 +1412,7 @@ static DWORD WINAPI WorkerThread(LPVOID workerThreadContext)
 
         default:
             break;
-
         }
-
     }
 
     return 0;
@@ -1415,21 +1430,20 @@ VOID cleanupSSL(VOID)
 
 void CleanupProxyServer()
 {
-    closesocket(proxySocket);    // Close the main proxy socket
-    WSACleanup();                // Clean up Winsock
-    cleanupSSL();                // Clean up OpenSSL resources
+    closesocket(proxySocket); // Close the main proxy socket
+    WSACleanup();             // Clean up Winsock
+    cleanupSSL();             // Clean up OpenSSL resources
 
     if (ProxyCompletionPort)
     {
-        CloseHandle(ProxyCompletionPort);  // Close the completion port handle
+        CloseHandle(ProxyCompletionPort); // Close the completion port handle
     }
 
     // Additional resource cleanup if needed
     spdlog::info("[+] Proxy server cleanup complete.");
 }
 
-
-VOID WINAPI ServiceMain(DWORD dwArgc, LPSTR* lpArgv)
+VOID WINAPI ServiceMain(DWORD dwArgc, LPSTR *lpArgv)
 {
     cout << "[+]ServiceMain start " << endl;
 
@@ -1513,13 +1527,13 @@ VOID ServiceControlHandler(DWORD dwControl)
     }
 }
 
-VOID ServiceInit(DWORD dwArgc, LPSTR* lpArgv)
+VOID ServiceInit(DWORD dwArgc, LPSTR *lpArgv)
 {
     hServiceEvent = CreateEvent(
-        NULL,	// default security attributes
-        TRUE,	// manual reset event
-        FALSE,	// not signalled
-        NULL	// no name
+        NULL,  // default security attributes
+        TRUE,  // manual reset event
+        FALSE, // not signalled
+        NULL   // no name
     );
 
     if (NULL == hServiceEvent)
@@ -1590,10 +1604,10 @@ VOID ServiceReportStatus(
 
 VOID ServiceInstall()
 {
-    SC_HANDLE	hScOpenSCManager = NULL;
-    SC_HANDLE	hScCreateService = NULL;
-    DWORD		dwGetModuleFileName = 0;
-    TCHAR		szPath[MAX_PATH];
+    SC_HANDLE hScOpenSCManager = NULL;
+    SC_HANDLE hScCreateService = NULL;
+    DWORD dwGetModuleFileName = 0;
+    TCHAR szPath[MAX_PATH];
 
     // get module file name from SCM
     dwGetModuleFileName = GetModuleFileName(NULL, szPath, MAX_PATH);
@@ -1609,9 +1623,9 @@ VOID ServiceInstall()
 
     // open Service Control Manager and get a handle to the SCM database
     hScOpenSCManager = OpenSCManager(
-        NULL,						// machine name - LOCAL MACHINE
-        NULL,						// By default database - SERVICES_ACTIVE_DATABASE
-        SC_MANAGER_ALL_ACCESS);	// access right
+        NULL,                   // machine name - LOCAL MACHINE
+        NULL,                   // By default database - SERVICES_ACTIVE_DATABASE
+        SC_MANAGER_ALL_ACCESS); // access right
     if (NULL == hScOpenSCManager)
     {
         cout << "OpenSCManager failed " << GetLastError() << endl;
@@ -1649,13 +1663,13 @@ VOID ServiceInstall()
 }
 VOID ServiceDelete()
 {
-    SC_HANDLE	hScOpenSCManager = NULL;
-    SC_HANDLE	hScOpenService = NULL;
-    BOOL		bDeleteService = FALSE;
+    SC_HANDLE hScOpenSCManager = NULL;
+    SC_HANDLE hScOpenService = NULL;
+    BOOL bDeleteService = FALSE;
 
     hScOpenSCManager = OpenSCManager(
-        NULL,					// local computer
-        NULL,					// ServiceActive Database
+        NULL,                   // local computer
+        NULL,                   // ServiceActive Database
         SC_MANAGER_ALL_ACCESS); // full access rights
     if (NULL == hScOpenSCManager)
     {
@@ -1668,9 +1682,9 @@ VOID ServiceDelete()
     }
 
     hScOpenService = OpenService(
-        hScOpenSCManager,		// SCM database
-        SERVICE_NAME,			// name of the service
-        SERVICE_ALL_ACCESS);	// need delete access
+        hScOpenSCManager,    // SCM database
+        SERVICE_NAME,        // name of the service
+        SERVICE_ALL_ACCESS); // need delete access
     if (NULL == hScOpenService)
     {
         cout << "OpenService failed " << GetLastError() << endl;
@@ -1698,15 +1712,15 @@ VOID ServiceDelete()
 
 VOID ServiceStart()
 {
-    BOOL		bStartService = TRUE;
-    SERVICE_STATUS_PROCESS	SvcStatusProcess;
-    SC_HANDLE	hOpenSCManager = NULL;
-    SC_HANDLE	hOpenService = NULL;
-    BOOL		bQueryServiceStatus = TRUE;
-    DWORD		dwBytesNeeded;
-    DWORD		dwWaitTime;
-    DWORD		dwOldCheckPoint;
-    DWORD		dwStartTickCount;
+    BOOL bStartService = TRUE;
+    SERVICE_STATUS_PROCESS SvcStatusProcess;
+    SC_HANDLE hOpenSCManager = NULL;
+    SC_HANDLE hOpenService = NULL;
+    BOOL bQueryServiceStatus = TRUE;
+    DWORD dwBytesNeeded;
+    DWORD dwWaitTime;
+    DWORD dwOldCheckPoint;
+    DWORD dwStartTickCount;
 
     hOpenSCManager = OpenSCManager(
         NULL,
@@ -1723,9 +1737,9 @@ VOID ServiceStart()
     }*/
 
     hOpenService = OpenService(
-        hOpenSCManager,			// SCM database
-        SERVICE_NAME,			// name of the service
-        SERVICE_ALL_ACCESS);	// need delete access
+        hOpenSCManager,      // SCM database
+        SERVICE_NAME,        // name of the service
+        SERVICE_ALL_ACCESS); // need delete access
     if (NULL == hOpenService)
     {
         cout << "OpenService failed " << GetLastError() << endl;
@@ -1738,11 +1752,11 @@ VOID ServiceStart()
 
     // query about current service status
     bQueryServiceStatus = QueryServiceStatusEx(
-        hOpenService,					// service handle
-        SC_STATUS_PROCESS_INFO,			// info level
-        (LPBYTE)&SvcStatusProcess,		// buffer
+        hOpenService,                   // service handle
+        SC_STATUS_PROCESS_INFO,         // info level
+        (LPBYTE)&SvcStatusProcess,      // buffer
         sizeof(SERVICE_STATUS_PROCESS), // buffer size
-        &dwBytesNeeded);				// bytes needed
+        &dwBytesNeeded);                // bytes needed
     if (FALSE == bQueryServiceStatus)
     {
         cout << "QueryServiceStatusEx failed " << GetLastError() << endl;
@@ -1898,15 +1912,15 @@ VOID ServiceStart()
 
 VOID ServiceStop()
 {
-    SERVICE_STATUS_PROCESS	SvcStatusProcess;
-    SC_HANDLE	hScOpenSCManager = NULL;
-    SC_HANDLE	hScOpenService = NULL;
-    BOOL		bQueryServiceStatus = TRUE;
-    BOOL		bControlService = TRUE;
-    DWORD		dwBytesNeeded;
-    DWORD		dwWaitTime;
-    DWORD		dwTimeout = 30000;
-    DWORD		dwStartTime = GetTickCount();
+    SERVICE_STATUS_PROCESS SvcStatusProcess;
+    SC_HANDLE hScOpenSCManager = NULL;
+    SC_HANDLE hScOpenService = NULL;
+    BOOL bQueryServiceStatus = TRUE;
+    BOOL bControlService = TRUE;
+    DWORD dwBytesNeeded;
+    DWORD dwWaitTime;
+    DWORD dwTimeout = 30000;
+    DWORD dwStartTime = GetTickCount();
 
     hScOpenSCManager = OpenSCManager(
         NULL,
@@ -1936,11 +1950,11 @@ VOID ServiceStop()
     }*/
 
     bQueryServiceStatus = QueryServiceStatusEx(
-        hScOpenService,					// service handle
-        SC_STATUS_PROCESS_INFO,			// info level
-        (LPBYTE)&SvcStatusProcess,		// buffer
+        hScOpenService,                 // service handle
+        SC_STATUS_PROCESS_INFO,         // info level
+        (LPBYTE)&SvcStatusProcess,      // buffer
         sizeof(SERVICE_STATUS_PROCESS), // buffer size
-        &dwBytesNeeded);				// bytes needed
+        &dwBytesNeeded);                // bytes needed
     if (FALSE == bQueryServiceStatus)
     {
         cout << "QueryServiceStatusEx failed " << GetLastError() << endl;
@@ -1985,7 +1999,8 @@ VOID ServiceStop()
             goto stopCleanup;
         }
 
-        if (GetTickCount() - dwStartTime > dwTimeout) {
+        if (GetTickCount() - dwStartTime > dwTimeout)
+        {
             cout << "Service stop timed out" << endl;
             goto stopCleanup;
         }

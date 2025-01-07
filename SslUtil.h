@@ -20,6 +20,7 @@
 
 using namespace std;
 
+// fucntion to create an WSASocket
 SOCKET createSocket(int port)
 {
     SOCKET socket;
@@ -68,6 +69,7 @@ SOCKET createSocket(int port)
     return socket;
 }
 
+// forming TCP connection with the target server
 SOCKET connectToTarget(const string& hostname, int port)
 {
     SOCKET sock;
@@ -115,6 +117,7 @@ SOCKET connectToTarget(const string& hostname, int port)
     return sock;
 }
 
+// parsing connect request to obtain hostname and port
 bool parseConnectRequest(const string& request, string& hostname, int& port)
 {
     size_t pos = request.find("CONNECT ");
